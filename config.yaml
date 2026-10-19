@@ -1,0 +1,32 @@
+# Koningsdag (Dia do Rei) 2027 = terça-feira, 27 de abril.
+# A véspera (Koningsnacht, 26 abril) também é grande festa -> convém lá estar nessa noite.
+
+origin: OPO
+
+# Aeroportos de destino. AMS = Amesterdão, EIN = Eindhoven, RTM = Roterdão.
+# Confirma que companhias voam mesmo estas rotas a partir do Porto (ainda não verificado).
+destinations: [AMS, EIN, RTM]
+
+dates:
+  # Janelas de datas (inclusive). O script testa todas as combinações ida/volta
+  # que respeitem o nº de noites abaixo.
+  outbound: [2027-04-24, 2027-04-26]
+  return:   [2027-04-28, 2027-04-30]
+  min_nights: 2
+  max_nights: 6
+
+search:
+  passengers: 2          # só serve para mostrar o total estimado nas mensagens
+  currency: EUR
+  max_stops: 1           # null = sem limite
+  carry_on_bags: 0       # low-cost: bagagem de mão grande/porão muda o preço, ajusta aqui
+  checked_bags: 0
+  delay_seconds: 3       # pausa entre pesquisas (não abuses do Google)
+
+alerts:
+  max_price_per_person: 90     # ida e volta, por pessoa. AJUSTA depois de veres a baseline
+  min_drop_to_realert: 5       # só volta a alertar a mesma combinação se baixar >= 5 EUR
+  summary_top_n: 5
+
+# Segurança para não fazer pesquisas a mais por execução.
+max_queries_per_run: 40
