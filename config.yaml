@@ -24,7 +24,7 @@ search:
   delay_seconds: 3       # pausa entre pesquisas (não abuses do Google)
 
 alerts:
-  max_price_per_person: 100    # ida e volta, por pessoa. AJUSTA depois de veres a baseline
+  max_price_per_person: 180    # ida e volta, por pessoa. AJUSTA depois de veres a baseline
   min_drop_to_realert: 5       # só volta a alertar a mesma combinação se baixar >= 5 EUR
   summary_top_n: 5
 
