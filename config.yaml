@@ -5,7 +5,7 @@ origin: OPO
 
 # Aeroportos de destino. AMS = Amesterdão, EIN = Eindhoven, RTM = Roterdão.
 # Confirma que companhias voam mesmo estas rotas a partir do Porto (ainda não verificado).
-destinations: [AMS, EIN, RTM]
+destinations: [AMS, EIN]   # RTM retirado: o Google não devolve voos OPO-RTM com <= 1 escala
 
 dates:
   # Janelas de datas (inclusive). O script testa todas as combinações ida/volta

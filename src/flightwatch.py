@@ -96,6 +96,26 @@ def build_combinations(cfg: dict) -> list[tuple[str, str, str, str]]:
 
 
 # ---------------------------------------------------------------- fornecedor
+# Cookie de "rejeitar tudo". Sem ele, pedidos vindos da UE recebem a página de
+# consentimento ("Antes de continuar") em vez dos resultados.
+GOOGLE_CONSENT_COOKIES = {"SOCS": "CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg"}
+
+
+def _consent_fetcher():
+    from fast_flights.integrations.base import FetchIntegration
+    from primp import Client
+
+    class ConsentFetcher(FetchIntegration):
+        def fetch_html(self, q, /) -> str:
+            client = Client(impersonate="chrome_145", impersonate_os="macos",
+                            referer=True, cookie_store=True)
+            params = q.params() if hasattr(q, "params") else {"q": q}
+            return client.get("https://www.google.com/travel/flights", params=params,
+                              cookies=GOOGLE_CONSENT_COOKIES).text
+
+    return ConsentFetcher()
+
+
 def fetch_cheapest(origin: str, dest: str, depart: str, ret: str, cfg: dict) -> Offer | None:
     """Pesquisa no Google Flights (via fast-flights) e devolve a oferta mais barata.
 
@@ -119,7 +139,7 @@ def fetch_cheapest(origin: str, dest: str, depart: str, ret: str, cfg: dict) -> 
         checked_bags=s.get("checked_bags", 0),
     )
     try:
-        results = get_flights(q)
+        results = get_flights(q, integration=_consent_fetcher())
     except FlightsNotFound:
         return None
 
@@ -229,7 +249,8 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
         print("Todas as pesquisas falharam (o Google pode estar a bloquear este IP).")
         return 1
 
-    append_history(offers, now, history_path)
+    if not dry_run:
+        append_history(offers, now, history_path)
 
     if summary:
         top = sorted(offers, key=lambda x: x.price)[: cfg["alerts"]["summary_top_n"]]
