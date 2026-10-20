@@ -311,11 +311,13 @@ def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
     else:
         line = (f"**{label}** {fmt_day(leg.day)}: {leg.frm} → {leg.to} ({names[other].get('name', other)}) · "
                 f"{leg.price:.0f} {leg.currency} · {leg.airlines} · {stops}")
+    # link mascarado; os <> evitam a pré-visualização gigante do Discord
+    line += f" · [ver no Google Flights](<{leg.google_flights_url()}>)"
     if ground:
         each_way = " (cada sentido)" if leg.ret_day else ""
         line += (f"\n  + comboio/autocarro{each_way} ≈ {ground:.0f} {leg.currency} · "
                  f"{names[other].get('ground_time', '')}")
-    return line + f"\n  <{leg.google_flights_url()}>"
+    return line
 
 
 def format_alert(trip: Trip, cfg: dict) -> str:
@@ -330,6 +332,28 @@ def format_alert(trip: Trip, cfg: dict) -> str:
     )
 
 
+def split_message(text: str, limit: int = 1900) -> list[str]:
+    """Parte o texto em mensagens até `limit` caracteres (o Discord aceita 2000),
+    cortando só entre parágrafos para não partir uma viagem ao meio."""
+    chunks: list[str] = []
+    current = ""
+    for para in text.split("\n\n"):
+        candidate = f"{current}\n\n{para}" if current else para
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        # parágrafo sozinho maior que o limite: último recurso, corta à bruta
+        while len(para) > limit:
+            chunks.append(para[:limit])
+            para = para[limit:]
+        current = para
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_discord(text: str, dry_run: bool = False) -> None:
     if dry_run:
         print("[dry-run] Discord:\n" + text + "\n")
@@ -337,8 +361,8 @@ def send_discord(text: str, dry_run: bool = False) -> None:
     url = os.environ.get("DISCORD_WEBHOOK_URL")
     if not url:
         raise RuntimeError("Falta a variável de ambiente DISCORD_WEBHOOK_URL")
-    for i in range(0, len(text), 1900):  # limite do Discord: 2000 caracteres
-        r = requests.post(url, json={"content": text[i:i + 1900]}, timeout=15)
+    for chunk in split_message(text):
+        r = requests.post(url, json={"content": chunk}, timeout=15)
         r.raise_for_status()
         time.sleep(0.5)
 

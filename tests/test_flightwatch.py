@@ -163,3 +163,13 @@ def test_old_state_keys_are_dropped(tmp_path):
 def test_real_config_loads_and_builds():
     cfg = fw.load_config()
     assert fw.build_searches(cfg)
+
+
+def test_split_message_never_cuts_a_trip():
+    trips = [f"✈️ viagem {i}\n" + "x" * 500 for i in range(5)]
+    chunks = fw.split_message("📊 Resumo\n\n" + "\n\n".join(trips))
+    assert all(len(c) <= 1900 for c in chunks)
+    assert len(chunks) > 1
+    for t in trips:                                           # cada viagem inteira numa só mensagem
+        assert sum(t in c for c in chunks) == 1
+    assert fw.split_message("y" * 4000) == ["y" * 1900, "y" * 1900, "y" * 200]
