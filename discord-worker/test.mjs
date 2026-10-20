@@ -49,10 +49,28 @@ await Promise.all(waits);
 const gh = calls.find((c) => c.url.includes("api.github.com"));
 assert.equal(gh.url, "https://api.github.com/repos/u/r/actions/workflows/check.yml/dispatches");
 const pedido = JSON.parse(JSON.parse(gh.init.body).inputs.pedido);
-assert.deepEqual(pedido, { destino: "Madrid", ida: "tarde 23/10", volta: "cedo 25/10", top: 2,
-  sair_depois: null, chegar_ate: null, origem: null, app_id: "123", token: "tok" });
+assert.deepEqual(pedido, { acao: "flight", destino: "Madrid", ida: "tarde 23/10", volta: "cedo 25/10",
+  top: 2, user: "42", app_id: "123", token: "tok" });
 const edit = calls.find((c) => c.url.endsWith("/webhooks/123/tok/messages/@original"));
 assert.match(JSON.parse(edit.init.body).content, /A procurar voos para \*\*Madrid\*\*/);
+
+// /vigiar e /parar também seguem para o GitHub, com a ação certa
+for (const [name, options, text] of [
+  ["vigiar", [{ name: "destino", value: "Roma" }, { name: "max", value: 120 },
+    { name: "quando", value: "fins de semana de novembro" }], /vigilância para \*\*Roma\*\*.*até 120/],
+  ["parar", [{ name: "id", value: 3 }], /parar a vigilância #3/],
+  ["vigilancias", [], /lista de vigilâncias/],
+]) {
+  calls.length = 0;
+  waits.length = 0;
+  res = await worker.fetch(await signed({ ...cmd, data: { name, options } }), env, ctx);
+  assert.deepEqual(await res.json(), { type: 5 });
+  await Promise.all(waits);
+  const p = JSON.parse(JSON.parse(calls.find((c) => c.url.includes("api.github.com")).init.body).inputs.pedido);
+  assert.equal(p.acao, name);
+  const msg = JSON.parse(calls.find((c) => c.url.endsWith("@original")).init.body).content;
+  assert.match(msg, text);
+}
 
 // utilizador fora da lista
 res = await worker.fetch(await signed(cmd), { ...env, ALLOWED_USERS: "7,8" }, ctx);

@@ -10,6 +10,22 @@
 //   ALLOWED_USERS       (opcional) IDs do Discord autorizados, separados por vírgulas
 
 const WORKFLOW = "check.yml";
+const COMMANDS = ["flight", "vigiar", "vigilancias", "parar"];
+
+// o que aparece logo no Discord enquanto o GitHub trabalha
+function pendingText(p) {
+  const when = p.quando ? p.quando : `ida ${p.ida ?? "?"}, volta ${p.volta ?? "?"}`;
+  switch (p.acao) {
+    case "vigiar":
+      return `👀 A criar a vigilância para **${p.destino}** (${when}, até ${p.max} €)… resposta em 1-3 minutos.`;
+    case "vigilancias":
+      return "📋 A ir buscar a lista de vigilâncias…";
+    case "parar":
+      return `🛑 A parar a vigilância #${p.id}…`;
+    default:
+      return `🔎 A procurar voos para **${p.destino}** (${when})… a resposta chega aqui em 1-3 minutos.`;
+  }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -31,7 +47,8 @@ export default {
     if (interaction.type === 1) {
       return json({ type: 1 }); // PING do Discord ao configurar o endpoint
     }
-    if (interaction.type !== 2 || interaction.data?.name !== "flight") {
+    const acao = interaction.data?.name;
+    if (interaction.type !== 2 || !COMMANDS.includes(acao)) {
       return reply("Comando desconhecido.");
     }
 
@@ -45,13 +62,9 @@ export default {
       (interaction.data.options || []).map((o) => [o.name, o.value]),
     );
     const pedido = {
-      destino: options.destino,
-      ida: options.ida,
-      volta: options.volta,
-      top: options.top ?? 3,
-      sair_depois: options.sair_depois ?? null,
-      chegar_ate: options.chegar_ate ?? null,
-      origem: options.origem ?? null,
+      acao,
+      ...options,
+      user: user.id ?? null,
       app_id: interaction.application_id,
       token: interaction.token,
     };
@@ -82,9 +95,8 @@ async function dispatch(env, pedido) {
       },
     );
     text = res.ok
-      ? `🔎 A procurar voos para **${pedido.destino}** (ida ${pedido.ida}, volta ${pedido.volta})… ` +
-        "a resposta chega aqui em 1-3 minutos."
-      : `❌ O GitHub recusou o pedido (HTTP ${res.status}): ${(await res.text()).slice(0, 300)}`;
+      ? pendingText(pedido)
+      :`❌ O GitHub recusou o pedido (HTTP ${res.status}): ${(await res.text()).slice(0, 300)}`;
   } catch (e) {
     text = `❌ Não consegui falar com o GitHub: ${e}`;
   }

@@ -71,7 +71,7 @@ A resposta chega ao Discord em 2-4 minutos. Pelo terminal:
 `gh workflow run flight-watch -f ida=23/04 -f volta=01/05 -f top=3 -f hora=17`
 (ou localmente: `python src/flightwatch.py --ida 23/04 --volta 01/05 --top 3 --hora 17`).
 
-## Comando /flight no Discord
+## Comandos no Discord
 
 Escreves no Discord, por exemplo:
 
@@ -87,6 +87,38 @@ Escreves no Discord, por exemplo:
 - **top** (por defeito 3) e **origem** (por defeito OPO)
 
 O bot responde logo "a procurar…" e 1-3 minutos depois aparecem as opções por baixo.
+
+Outras opções do `/flight` (e do `/vigiar`):
+
+- **quando**: em vez de ida/volta, `fins de semana de novembro`, `próximos 4 fins de semana` ou
+  `este fim de semana`. Testa cada fim de semana (sexta a partir das 17h → domingo) e mostra o
+  melhor de cada um, do mais barato para o mais caro.
+- **bagagem**: `com mala de cabine` soma a mala de cabine ao preço (nas low-cost muda bastante).
+  O Google não sabe somar malas de porão, por isso essa opção não existe.
+
+### Vigilâncias
+
+```
+/vigiar destino:Madrid max:120 ida:tarde 20/11 volta:cedo 22/11
+/vigiar destino:Roma max:150 quando:fins de semana de dezembro bagagem:com mala de cabine
+/vigilancias
+/parar id:2
+```
+
+- `/vigiar` responde logo com o preço atual e depois verifica 3x por dia (nas corridas agendadas).
+  Quando o total por pessoa fica ≤ `max`, avisa no canal e menciona quem criou a vigilância;
+  volta a avisar só se baixar mais 5 €.
+- `/vigilancias` lista as ativas (com o último preço visto); `/parar` apaga uma (só quem a criou).
+- Ficam em `data/watches.json` e desaparecem sozinhas quando as datas passam. Máximo 10 ativas.
+- O resumo diário das 9h30 junta uma linha por vigilância.
+
+### Sinal de "compra já"
+
+Em cada corrida o bot guarda o melhor preço (do Koningsdag e de cada vigilância) e avisa:
+
+- 📈 quando o preço sobe 3 vezes seguidas (pelo menos +10 € ou +5% no total), uma vez por subida;
+- 📉 quando aparece o preço mais baixo desde que começou a vigiar (≥ 5 € abaixo do mínimo, depois de
+  pelo menos 6 medições).
 
 **Como funciona:** Discord → Cloudflare Worker (`discord-worker/`, grátis, sempre ligado) →
 GitHub Actions (`workflow_dispatch` com o pedido) → o script responde à interação do Discord.

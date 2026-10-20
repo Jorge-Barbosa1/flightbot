@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
       pedido:
-        description: "Uso interno: pedido do comando /flight do Discord (JSON). Deixa vazio."
+        description: "Uso interno: pedido dos comandos do Discord (JSON). Deixa vazio."
         type: string
         default: ""
 
@@ -76,4 +76,11 @@ jobs:
           git config user.name "flightwatch-bot"
           git config user.email "flightwatch-bot@users.noreply.github.com"
           git add data
-          git diff --cached --quiet || (git commit -m "data: atualizar preços" && git pull --rebase -q && git push)
+          git diff --cached --quiet && exit 0
+          git commit -m "data: atualizar preços"
+          # outra corrida (ex. um /vigiar) pode ter feito push entretanto: tenta algumas vezes
+          for i in 1 2 3 4 5; do
+            git pull --rebase -q && git push && exit 0
+            sleep $((i * 5))
+          done
+          exit 1

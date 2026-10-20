@@ -259,3 +259,139 @@ def test_request_with_no_flights_says_so(cfg, tmp_path, monkeypatch):
     fw.run(cfg, fetch=fake_fetch({}), state_path=tmp_path / "s.json", history_path=tmp_path / "h.csv",
            sleep=lambda s: None, request="vazio")
     assert "Não encontrei" in sent[0]
+
+
+# ---------------------------------------------------------------- fins de semana / bagagem
+def test_parse_when_weekends():
+    # TODAY = terça 20 out 2026
+    assert fw.parse_when("fins de semana de novembro", TODAY) == [
+        ("2026-11-06", "2026-11-08"), ("2026-11-13", "2026-11-15"),
+        ("2026-11-20", "2026-11-22"), ("2026-11-27", "2026-11-29")]
+    assert fw.parse_when("este fim de semana", TODAY) == [("2026-10-23", "2026-10-25")]
+    assert len(fw.parse_when("próximos 3 fins de semana", TODAY)) == 3
+    assert fw.parse_when("fds de outubro", TODAY) == [("2026-10-23", "2026-10-25"), ("2026-10-30", "2026-11-01")]
+    assert fw.parse_when("março", TODAY)[0][0].startswith("2027-03")     # mês já passado -> ano seguinte
+    with pytest.raises(ValueError):
+        fw.parse_when("quando calhar", TODAY)
+
+
+def test_request_with_quando(cfg):
+    r = fw.apply_request(cfg, None, None, None, None, destino="Roma", quando="novembro", today=TODAY)
+    assert fw.date_pairs(r)[0] == ("2026-11-06", "2026-11-08")
+    assert fw.earliest_hour(r, "2026-11-06") == fw.LATE_HOUR          # sexta à noite por defeito
+    assert r["alerts"]["summary_top_n"] == 4 and r["request"]["per_pair"] == 1
+    assert "fins de semana 6 nov, 13 nov" in fw.request_title(r, "Roma")
+    with pytest.raises(ValueError):
+        fw.apply_request(cfg, "23/10", None, None, None, destino="Roma", quando="novembro", today=TODAY)
+
+
+def test_bagagem(cfg):
+    r = fw.apply_request(cfg, "23/10", "25/10", None, None, destino="MAD", bagagem="cabine", today=TODAY)
+    assert r["search"]["carry_on_bags"] == 1 and "mala de cabine" in fw.request_title(r, "MAD")
+    assert fw.parse_bags(None) == 0 and fw.parse_bags("nenhuma") == 0
+    with pytest.raises(ValueError):
+        fw.parse_bags("porão")
+
+
+# ---------------------------------------------------------------- compra já
+def test_trend_rise_alerts_once_per_streak():
+    st = {}
+    msgs = [fw.trend_signal(st, v, "t", 5, "X") for v in [200, 205, 212, 220, 230]]
+    assert msgs[:3] == [None, None, None]
+    assert "a subir" in msgs[3] and "200 → 205 → 212 → 220" in msgs[3]
+    assert msgs[4] is None                                    # mesma subida, não repete
+    fw.trend_signal(st, 210, "t", 5, "X")                     # desce: volta a poder avisar
+    assert st["rise_alerted"] is False
+
+
+def test_trend_small_rise_is_noise():
+    st = {}
+    msgs = [fw.trend_signal(st, v, "t", 5, "X") for v in [237, 238, 239, 240]]
+    assert msgs == [None] * 4
+
+
+def test_trend_new_low():
+    st = {}
+    for v in [240, 241, 239, 242, 240, 238]:
+        assert fw.trend_signal(st, v, "t", 5, "X") is None
+    assert "mais baixo" in fw.trend_signal(st, 230, "t", 5, "X")
+    assert fw.trend_signal(st, 228, "t", 5, "X") is None      # só 2 € abaixo do novo mínimo
+
+
+# ---------------------------------------------------------------- vigilâncias
+@pytest.fixture
+def discord(monkeypatch):
+    sent = []
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    return sent
+
+
+def watch_paths(tmp_path):
+    return {"state_path": tmp_path / "s.json", "watches_path": tmp_path / "w.json"}
+
+
+def test_vigiar_list_parar(cfg, tmp_path, discord):
+    paths = watch_paths(tmp_path)
+    fetch = fake_fetch({("OPO", "MAD"): 60, ("MAD", "OPO"): 50})
+    req = {"acao": "vigiar", "destino": "Madrid", "ida": "20/11", "volta": "22/11", "max": 100, "user": "42"}
+    assert fw.handle_pedido(cfg, req, fetch=fetch, sleep=lambda s: None, today=TODAY, **paths) == 0
+    assert "Vigilância #1 criada" in discord[-1] and "110 €/pessoa" in discord[-1]
+    watches = fw.load_watches(paths["watches_path"])
+    assert watches[0]["max"] == 100 and "alerted_at_creation" not in watches[0]   # 110 > 100
+
+    fw.handle_pedido(cfg, {"acao": "vigilancias"}, today=TODAY, **paths)
+    assert "#1" in discord[-1] and "<@42>" in discord[-1]
+
+    fw.handle_pedido(cfg, {"acao": "parar", "id": 1, "user": "99"}, today=TODAY, **paths)
+    assert "só essa pessoa" in discord[-1]
+    fw.handle_pedido(cfg, {"acao": "parar", "id": 1, "user": "42"}, today=TODAY, **paths)
+    assert "parada" in discord[-1] and fw.load_watches(paths["watches_path"]) == []
+
+
+def test_run_watches_alerts_once(cfg, tmp_path, discord):
+    paths = watch_paths(tmp_path)
+    cheap = fake_fetch({("OPO", "MAD"): 40, ("MAD", "OPO"): 40})
+    fw.handle_pedido(cfg, {"acao": "vigiar", "destino": "MAD", "ida": "20/11", "volta": "22/11",
+                           "max": 100, "user": "42"},
+                     fetch=fake_fetch({("OPO", "MAD"): 90, ("MAD", "OPO"): 90}),
+                     sleep=lambda s: None, today=TODAY, **paths)
+    discord.clear()
+    fw.run_watches(cfg, fetch=cheap, sleep=lambda s: None, today=TODAY, **paths)
+    assert len(discord) == 1 and "<@42>" in discord[0] and "abaixo de 100" in discord[0]
+    fw.run_watches(cfg, fetch=cheap, sleep=lambda s: None, today=TODAY, **paths)
+    assert len(discord) == 1                                   # mesmo preço: não repete
+    fw.run_watches(cfg, summary=True, fetch=cheap, sleep=lambda s: None, today=TODAY, **paths)
+    assert "👀 **Vigilâncias**" in discord[-1] and "agora 80 €" in discord[-1]
+
+
+def test_watch_already_under_limit_not_realerted(cfg, tmp_path, discord):
+    paths = watch_paths(tmp_path)
+    fetch = fake_fetch({("OPO", "MAD"): 40, ("MAD", "OPO"): 40})
+    fw.handle_pedido(cfg, {"acao": "vigiar", "destino": "MAD", "ida": "20/11", "volta": "22/11", "max": 100},
+                     fetch=fetch, sleep=lambda s: None, today=TODAY, **paths)
+    assert "já está abaixo" in discord[-1]
+    discord.clear()
+    fw.run_watches(cfg, fetch=fetch, sleep=lambda s: None, today=TODAY, **paths)
+    assert discord == []                                       # já tinha sido mostrado ao criar
+
+
+def test_expired_watches_are_ignored(cfg, tmp_path, discord):
+    paths = watch_paths(tmp_path)
+    fw.handle_pedido(cfg, {"acao": "vigiar", "destino": "MAD", "ida": "20/11", "volta": "22/11", "max": 100},
+                     fetch=fake_fetch({}), sleep=lambda s: None, today=TODAY, **paths)
+    later = __import__("datetime").date(2026, 12, 1)
+    assert fw.active_watches(fw.load_watches(paths["watches_path"]), later) == []
+
+
+def test_vigiar_needs_max(cfg, tmp_path, discord):
+    fw.handle_pedido(cfg, {"acao": "vigiar", "destino": "MAD", "ida": "20/11", "volta": "22/11"},
+                     today=TODAY, **watch_paths(tmp_path))
+    assert discord[-1].startswith("❌")
+
+
+def test_format_arrival_next_day():
+    class A:
+        date, time = (2026, 11, 16), (8, 10)
+    assert fw.format_arrival(A, "2026-11-15") == "08:10 (+1 dia)"
+    A.date = (2026, 11, 15)
+    assert fw.format_arrival(A, "2026-11-15") == "08:10"
