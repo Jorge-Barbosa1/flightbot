@@ -5,19 +5,21 @@ origin: OPO
 
 # Aeroportos onde se pode chegar/partir. A ida e a volta são pesquisadas em separado
 # (só ida), por isso podem ser de aeroportos e companhias diferentes.
-# ground_cost = estimativa por pessoa, só ida, do aeroporto até Amesterdão (comboio/autocarro).
-# São ESTIMATIVAS de bilhete comprado com antecedência: confirma em ns.nl / bahn.de /
-# belgiantrain.be / flibco.com antes de comprar e ajusta aqui.
+# ground_cost = custo por pessoa, só ida, do aeroporto até Amesterdão Centraal.
+# Valores pesquisados a 20 out 2026 (NS, NS International, DB, Flibco, Rome2rio), para bilhetes
+# comprados com algumas semanas de antecedência, com folga porque no Koningsdag os comboios enchem.
 airports:
   AMS: {name: Amesterdão, ground_cost: 0}
-  EIN: {name: Eindhoven, ground_cost: 20, ground_time: "~1h30"}
-  NRN: {name: "Weeze, Alemanha", ground_cost: 30, ground_time: "~2h30 (autocarro + comboio via Nijmegen)"}
-  DUS: {name: "Düsseldorf, Alemanha", ground_cost: 40, ground_time: "~2h30"}
-  CGN: {name: "Colónia, Alemanha", ground_cost: 45, ground_time: "~3h"}
-  BRU: {name: "Bruxelas, Bélgica", ground_cost: 40, ground_time: "~2h45"}
-  CRL: {name: "Charleroi, Bélgica", ground_cost: 55, ground_time: "~3h30 (autocarro + comboio via Bruxelas)"}
-  # Paris (BVA/CDG) e Roterdão (RTM) testados e deixados de fora: Paris fica a 3h20+ de
-  # comboio caro, e o Google não devolve voos OPO-RTM.
+  EIN: {name: Eindhoven, ground_cost: 30, ground_time: "~1h45: autocarro 400/401 até à estação + comboio NS (~26 €, preço fixo)"}
+  NRN: {name: "Weeze, Alemanha", ground_cost: 35, ground_time: "~2h50: autocarro SB46 até Nijmegen + comboio NS (~24 €)"}
+  DUS: {name: "Düsseldorf, Alemanha", ground_cost: 35, ground_time: "~2h30: ICE direto do aeroporto (DB Sparpreis desde ~20 €)"}
+  CGN: {name: "Colónia, Alemanha", ground_cost: 40, ground_time: "~3h: S-Bahn até Köln Hbf + ICE (DB Sparpreis desde ~20 €)"}
+  BRU: {name: "Bruxelas, Bélgica", ground_cost: 45, ground_time: "~3h: comboio até Bruxelas + Eurocity Direct (desde 25 €)"}
+  CRL: {name: "Charleroi, Bélgica", ground_cost: 55, ground_time: "~3h30: autocarro Flibco até Bruxelas-Midi (~19 €) + Eurocity Direct"}
+
+# Aeroportos onde também se pesquisa ida e volta na mesma companhia (por vezes mais barato
+# que duas idas soltas nas companhias tradicionais). Cada um custa 1 pesquisa por par de datas.
+roundtrip_airports: [AMS]
 
 dates:
   # Janelas de datas (inclusive). O script testa todas as combinações ida/volta

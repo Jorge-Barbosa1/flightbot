@@ -7,6 +7,8 @@ para Amesterdão) à volta do Koningsdag (27 abril 2027) e avisa no Discord
 
 Pesquisa a ida e a volta em separado (só ida), o que permite misturar
 companhias e aeroportos: ex. ir pela Ryanair para Weeze e voltar de Amesterdão.
+Nos aeroportos de `roundtrip_airports` pesquisa também ida e volta na mesma
+companhia, e fica com a opção mais barata.
 
 Uso:
     python src/flightwatch.py                # corre as pesquisas e envia alertas
@@ -35,7 +37,7 @@ CONFIG_PATH = ROOT / "config.yaml"
 STATE_PATH = ROOT / "data" / "state.json"
 HISTORY_PATH = ROOT / "data" / "legs.csv"
 
-HISTORY_FIELDS = ["checked_at", "from", "to", "date", "price", "airlines", "stops", "currency"]
+HISTORY_FIELDS = ["checked_at", "from", "to", "date", "price", "airlines", "stops", "currency", "return"]
 
 MONTHS_PT = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 
@@ -43,26 +45,31 @@ MONTHS_PT = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out
 # ---------------------------------------------------------------- modelos
 @dataclass(frozen=True)
 class Leg:
-    """Um voo só de ida (o mais barato encontrado para essa rota e dia)."""
+    """O voo mais barato encontrado para essa rota e dia. Só ida, ou ida e
+    volta na mesma companhia se `ret_day` estiver preenchido."""
     frm: str
     to: str
     day: str             # YYYY-MM-DD
-    price: float         # por pessoa
+    price: float         # por pessoa (ida e volta, se ret_day)
     airlines: str
-    stops: int
+    stops: int           # escalas na ida
     currency: str
+    ret_day: str | None = None
 
     @property
     def key(self) -> str:
-        return f"{self.frm}-{self.to}|{self.day}"
+        return f"{self.frm}-{self.to}|{self.day}" + (f"|{self.ret_day}" if self.ret_day else "")
 
     def google_flights_url(self) -> str:
         """Link para abrires a pesquisa equivalente no Google Flights."""
         from fast_flights import FlightQuery, Passengers, create_query
 
+        flights = [FlightQuery(date=self.day, from_airport=self.frm, to_airport=self.to)]
+        if self.ret_day:
+            flights.append(FlightQuery(date=self.ret_day, from_airport=self.to, to_airport=self.frm))
         q = create_query(
-            flights=[FlightQuery(date=self.day, from_airport=self.frm, to_airport=self.to)],
-            trip="one-way",
+            flights=flights,
+            trip="round-trip" if self.ret_day else "one-way",
             passengers=Passengers(adults=1),
             currency=self.currency,
             language="pt-PT",
@@ -72,23 +79,31 @@ class Leg:
 
 @dataclass(frozen=True)
 class Trip:
-    """Ida + volta, com o custo estimado de comboio/autocarro até Amesterdão."""
+    """Ida + volta, com o custo estimado de comboio/autocarro até Amesterdão.
+
+    Se `ret` for None, `out` é um bilhete de ida e volta na mesma companhia.
+    """
     out: Leg
-    ret: Leg
+    ret: Leg | None
     ground_out: float    # do aeroporto de chegada até Amesterdão
     ground_ret: float    # de Amesterdão até ao aeroporto de partida
 
     @property
+    def ret_day(self) -> str:
+        return self.ret.day if self.ret else self.out.ret_day
+
+    @property
     def key(self) -> str:
-        return f"{self.out.day}>{self.ret.day}"
+        return f"{self.out.day}>{self.ret_day}"
 
     @property
     def total(self) -> float:
-        return self.out.price + self.ret.price + self.ground_out + self.ground_ret
+        flights = self.out.price + (self.ret.price if self.ret else 0)
+        return flights + self.ground_out + self.ground_ret
 
     @property
     def nights(self) -> int:
-        return (date.fromisoformat(self.ret.day) - date.fromisoformat(self.out.day)).days
+        return (date.fromisoformat(self.ret_day) - date.fromisoformat(self.out.day)).days
 
 
 # ---------------------------------------------------------------- config
@@ -113,14 +128,16 @@ def date_pairs(cfg: dict) -> list[tuple[str, str]]:
     ]
 
 
-def build_searches(cfg: dict) -> list[tuple[str, str, str]]:
-    """(de, para, dia): idas Porto -> cada aeroporto e voltas cada aeroporto -> Porto."""
+def build_searches(cfg: dict) -> list[tuple[str, str, str, str | None]]:
+    """(de, para, dia, volta): idas Porto -> cada aeroporto, voltas cada
+    aeroporto -> Porto (volta = None) e ida e volta nos `roundtrip_airports`."""
     pairs = date_pairs(cfg)
     out_days = sorted({o for o, _ in pairs})
     ret_days = sorted({r for _, r in pairs})
     origin, airports = cfg["origin"], list(cfg["airports"])
-    searches = [(origin, a, d) for d in out_days for a in airports]
-    searches += [(a, origin, d) for d in ret_days for a in airports]
+    searches = [(origin, a, d, None) for d in out_days for a in airports]
+    searches += [(a, origin, d, None) for d in ret_days for a in airports]
+    searches += [(origin, a, o, r) for o, r in pairs for a in cfg.get("roundtrip_airports", [])]
     limit = cfg.get("max_queries_per_run")
     return searches[:limit] if limit else searches
 
@@ -133,12 +150,19 @@ def build_trips(legs: list[Leg], cfg: dict) -> list[Trip]:
     """A viagem mais barata (voos + comboio) para cada par de datas válido.
 
     A ida e a volta são escolhidas de forma independente, por isso podem ser
-    de aeroportos e companhias diferentes.
+    de aeroportos e companhias diferentes. Um bilhete de ida e volta na mesma
+    companhia ganha se custar o mesmo ou menos.
     """
     origin = cfg["origin"]
     best_out: dict[str, tuple[float, Leg]] = {}
     best_ret: dict[str, tuple[float, Leg]] = {}
+    best_rt: dict[tuple[str, str], tuple[float, Leg]] = {}
     for leg in legs:
+        if leg.ret_day:
+            cost, pair = leg.price + 2 * ground_cost(cfg, leg.to), (leg.day, leg.ret_day)
+            if pair not in best_rt or cost < best_rt[pair][0]:
+                best_rt[pair] = (cost, leg)
+            continue
         if leg.frm == origin:
             cost, table = leg.price + ground_cost(cfg, leg.to), best_out
         else:
@@ -148,9 +172,17 @@ def build_trips(legs: list[Leg], cfg: dict) -> list[Trip]:
 
     trips = []
     for o, r in date_pairs(cfg):
+        options = []
+        if (o, r) in best_rt:
+            rt = best_rt[(o, r)][1]
+            g = ground_cost(cfg, rt.to)
+            options.append(Trip(rt, None, g, g))
         if o in best_out and r in best_ret:
             out, ret = best_out[o][1], best_ret[r][1]
-            trips.append(Trip(out, ret, ground_cost(cfg, out.to), ground_cost(cfg, ret.frm)))
+            options.append(Trip(out, ret, ground_cost(cfg, out.to), ground_cost(cfg, ret.frm)))
+        if options:
+            # em caso de empate fica o de ida e volta (vem primeiro)
+            trips.append(min(options, key=lambda t: t.total))
     return sorted(trips, key=lambda t: t.total)
 
 
@@ -175,9 +207,9 @@ def _consent_fetcher():
     return ConsentFetcher()
 
 
-def fetch_cheapest(frm: str, to: str, day: str, cfg: dict) -> Leg | None:
-    """Pesquisa no Google Flights (via fast-flights) e devolve o voo só de ida
-    mais barato.
+def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> Leg | None:
+    """Pesquisa no Google Flights (via fast-flights) e devolve o voo mais
+    barato: só ida, ou ida e volta se `ret` estiver preenchido.
 
     Para trocar de fornecedor (ex.: SerpApi), basta substituir esta função por
     outra que devolva um Leg ou None. O resto do código não muda.
@@ -185,9 +217,12 @@ def fetch_cheapest(frm: str, to: str, day: str, cfg: dict) -> Leg | None:
     from fast_flights import FlightQuery, FlightsNotFound, Passengers, create_query, get_flights
 
     s = cfg["search"]
+    flights = [FlightQuery(date=day, from_airport=frm, to_airport=to, max_stops=s.get("max_stops"))]
+    if ret:
+        flights.append(FlightQuery(date=ret, from_airport=to, to_airport=frm, max_stops=s.get("max_stops")))
     q = create_query(
-        flights=[FlightQuery(date=day, from_airport=frm, to_airport=to, max_stops=s.get("max_stops"))],
-        trip="one-way",
+        flights=flights,
+        trip="round-trip" if ret else "one-way",
         seat="economy",
         passengers=Passengers(adults=1),  # preço por pessoa; multiplicamos depois
         currency=s["currency"],
@@ -214,6 +249,7 @@ def fetch_cheapest(frm: str, to: str, day: str, cfg: dict) -> Leg | None:
         airlines=", ".join(best.airlines),
         stops=max(len(best.flights) - 1, 0),
         currency=s["currency"],
+        ret_day=ret,
     )
 
 
@@ -242,7 +278,8 @@ def append_history(legs: list[Leg], when: str, path: Path = HISTORY_PATH) -> Non
         if new_file:
             w.writerow(HISTORY_FIELDS)
         for leg in legs:
-            w.writerow([when, leg.frm, leg.to, leg.day, leg.price, leg.airlines, leg.stops, leg.currency])
+            w.writerow([when, leg.frm, leg.to, leg.day, leg.price, leg.airlines, leg.stops, leg.currency,
+                        leg.ret_day or ""])
 
 
 # ---------------------------------------------------------------- alertas
@@ -267,10 +304,17 @@ def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
     names = cfg["airports"]
     other = leg.to if leg.frm == cfg["origin"] else leg.frm
     stops = "direto" if leg.stops == 0 else f"{leg.stops} escala(s)"
-    line = (f"**{label}** {fmt_day(leg.day)}: {leg.frm} → {leg.to} ({names[other].get('name', other)}) · "
-            f"{leg.price:.0f} {leg.currency} · {leg.airlines} · {stops}")
+    if leg.ret_day:
+        line = (f"**{label}** {fmt_day(leg.day)} → {fmt_day(leg.ret_day)}: {leg.frm} ⇄ {leg.to} "
+                f"({names[other].get('name', other)}) · {leg.price:.0f} {leg.currency} · {leg.airlines} · "
+                f"{stops} na ida")
+    else:
+        line = (f"**{label}** {fmt_day(leg.day)}: {leg.frm} → {leg.to} ({names[other].get('name', other)}) · "
+                f"{leg.price:.0f} {leg.currency} · {leg.airlines} · {stops}")
     if ground:
-        line += f"\n  + comboio/autocarro {names[other].get('ground_time', '')} ≈ {ground:.0f} {leg.currency}"
+        each_way = " (cada sentido)" if leg.ret_day else ""
+        line += (f"\n  + comboio/autocarro{each_way} ≈ {ground:.0f} {leg.currency} · "
+                 f"{names[other].get('ground_time', '')}")
     return line + f"\n  <{leg.google_flights_url()}>"
 
 
@@ -278,10 +322,11 @@ def format_alert(trip: Trip, cfg: dict) -> str:
     n = cfg["search"]["passengers"]
     cur = trip.out.currency
     return (
-        f"✈️ **{fmt_day(trip.out.day)} → {fmt_day(trip.ret.day)}** · {trip.nights} noites · "
+        f"✈️ **{fmt_day(trip.out.day)} → {fmt_day(trip.ret_day)}** · {trip.nights} noites · "
         f"**{trip.total:.0f} {cur}/pessoa** (≈ {trip.total * n:.0f} {cur} para {n})\n"
-        f"{format_leg('Ida', trip.out, trip.ground_out, cfg)}\n"
-        f"{format_leg('Volta', trip.ret, trip.ground_ret, cfg)}"
+        + (format_leg("Ida e volta", trip.out, trip.ground_out, cfg) if trip.ret is None else
+           f"{format_leg('Ida', trip.out, trip.ground_out, cfg)}\n"
+           f"{format_leg('Volta', trip.ret, trip.ground_ret, cfg)}")
     )
 
 
@@ -309,12 +354,12 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
 
     legs: list[Leg] = []
     failures = 0
-    for frm, to, day in searches:
+    for frm, to, day, ret in searches:
         try:
-            leg = fetch(frm, to, day, cfg)
+            leg = fetch(frm, to, day, ret, cfg)
         except Exception as e:  # noqa: BLE001 - não queremos parar tudo por uma pesquisa
             failures += 1
-            print(f"  ! {frm}-{to} {day}: {type(e).__name__}: {str(e)[:120]}")
+            print(f"  ! {frm}-{to} {day}{'->' + ret if ret else ''}: {type(e).__name__}: {str(e)[:120]}")
             sleep(cfg["search"]["delay_seconds"])
             continue
         if leg:
@@ -331,7 +376,8 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
 
     trips = build_trips(legs, cfg)
     for t in trips:
-        print(f"  viagem {t.key}: {t.total:.0f} ({t.out.to} / {t.ret.frm})")
+        how = f"ida e volta {t.out.to}" if t.ret is None else f"{t.out.to} / {t.ret.frm}"
+        print(f"  viagem {t.key}: {t.total:.0f} ({how})")
 
     if summary:
         top = trips[: cfg["alerts"]["summary_top_n"]]

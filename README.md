@@ -11,9 +11,12 @@ Não usa IA nem chaves pagas: é um script Python que corre em cron e fala com u
 - **Só ida, nos dois sentidos:** cada execução pesquisa Porto → cada aeroporto em cada dia de ida
   e cada aeroporto → Porto em cada dia de volta. Assim a viagem pode misturar companhias e
   aeroportos (ex.: ida pela Ryanair para Weeze, volta de Amesterdão pela Vueling).
+- **Ida e volta na mesma companhia:** nos aeroportos de `roundtrip_airports` (por defeito AMS)
+  pesquisa também o bilhete de ida e volta, que nas companhias tradicionais às vezes sai mais
+  barato que duas idas soltas. Fica sempre a opção mais barata (em empate, a de ida e volta).
 - **Aeroportos vizinhos + comboio:** além de AMS e EIN, procura em Weeze, Düsseldorf, Colónia,
-  Bruxelas e Charleroi, e soma uma estimativa do comboio/autocarro até Amesterdão (`ground_cost`
-  em `config.yaml`).
+  Bruxelas e Charleroi, e soma o comboio/autocarro até Amesterdão (`ground_cost` em `config.yaml`,
+  valores pesquisados a 20 out 2026). Paris e Roterdão foram testados e postos de parte.
 - **Alerta:** para cada par de datas fica a combinação mais barata. Se o total por pessoa
   (2 voos + comboios) ficar abaixo de `max_price_per_person`, manda tudo numa mensagem.
 

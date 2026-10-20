@@ -28,15 +28,15 @@ def no_urls(monkeypatch):
     monkeypatch.setattr(fw.Leg, "google_flights_url", lambda self: "http://example/x")
 
 
-def leg(frm, to, day, price, airline="Ryanair"):
-    return fw.Leg(frm, to, day, price, airline, 0, "EUR")
+def leg(frm, to, day, price, airline="Ryanair", ret=None):
+    return fw.Leg(frm, to, day, price, airline, 0, "EUR", ret)
 
 
 def fake_fetch(prices):
     """prices: {(de, para): preço}; o mesmo preço para todos os dias."""
-    def fetch(frm, to, day, cfg):
-        p = prices.get((frm, to))
-        return leg(frm, to, day, p) if p is not None else None
+    def fetch(frm, to, day, ret, cfg):
+        p = prices.get((frm, to, "rt") if ret else (frm, to))
+        return leg(frm, to, day, p, ret=ret) if p is not None else None
     return fetch
 
 
@@ -56,7 +56,11 @@ def test_searches_are_one_way_both_directions(cfg):
     s = fw.build_searches(cfg)
     # 2 dias de ida x 2 aeroportos + 2 dias de volta x 2 aeroportos
     assert len(s) == 8
-    assert ("OPO", "NRN", "2027-04-25") in s and ("AMS", "OPO", "2027-04-29") in s
+    assert ("OPO", "NRN", "2027-04-25", None) in s and ("AMS", "OPO", "2027-04-29", None) in s
+    cfg["roundtrip_airports"] = ["AMS"]
+    s = fw.build_searches(cfg)
+    assert len(s) == 8 + 4                                    # + 1 ida e volta por par de datas
+    assert ("OPO", "AMS", "2027-04-25", "2027-04-28") in s
     cfg["max_queries_per_run"] = 3
     assert len(fw.build_searches(cfg)) == 3
 
@@ -76,6 +80,24 @@ def test_trips_mix_airports_and_add_ground_cost(cfg):
     assert t.nights == 3
 
 
+def test_roundtrip_wins_when_cheaper_or_equal(cfg):
+    one_way = [leg("OPO", "AMS", "2027-04-25", 100), leg("AMS", "OPO", "2027-04-28", 80)]
+    rt = leg("OPO", "AMS", "2027-04-25", 180, "KLM", ret="2027-04-28")
+    t = fw.build_trips(one_way + [rt], cfg)[0]
+    assert t.ret is None and t.total == 180 and t.ret_day == "2027-04-28"   # empate: ida e volta
+    pricier_rt = leg("OPO", "AMS", "2027-04-25", 181, "KLM", ret="2027-04-28")
+    t = fw.build_trips(one_way + [pricier_rt], cfg)[0]
+    assert t.ret is not None and t.total == 180
+
+
+def test_roundtrip_ground_cost_counts_both_ways(cfg):
+    rt = leg("OPO", "NRN", "2027-04-25", 100, ret="2027-04-28")
+    t = fw.build_trips([rt], cfg)[0]
+    assert t.total == 100 + 2 * 30
+    msg = fw.format_alert(t, cfg)
+    assert "Ida e volta" in msg and "OPO ⇄ NRN" in msg and "cada sentido" in msg
+
+
 def test_should_alert_rules(cfg):
     def trip(total):
         return fw.Trip(leg("OPO", "AMS", "2027-04-25", total - 50),
@@ -93,7 +115,7 @@ def test_format_alert_shows_both_legs_and_train(cfg):
     msg = fw.format_alert(t, cfg)
     assert "25 abr → 28 abr" in msg and "3 noites" in msg
     assert "160 EUR/pessoa" in msg and "320 EUR para 2" in msg
-    assert "Weeze" in msg and "comboio/autocarro ~2h30 ≈ 30 EUR" in msg
+    assert "Weeze" in msg and "comboio/autocarro ≈ 30 EUR · ~2h30" in msg
     assert msg.count("comboio") == 1                          # volta é de AMS, sem comboio
 
 
