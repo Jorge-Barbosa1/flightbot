@@ -173,3 +173,53 @@ def test_split_message_never_cuts_a_trip():
     for t in trips:                                           # cada viagem inteira numa só mensagem
         assert sum(t in c for c in chunks) == 1
     assert fw.split_message("y" * 4000) == ["y" * 1900, "y" * 1900, "y" * 200]
+
+
+def test_parse_dates():
+    assert fw.parse_day("23/04", 2027) == "2027-04-23"
+    assert fw.parse_day("1/5/27", 2027) == "2027-05-01"
+    assert fw.parse_day("2027-04-23", 2026) == "2027-04-23"
+    assert fw.parse_span("23/04", 2027) == ["2027-04-23", "2027-04-23"]
+    assert fw.parse_span("23/04 a 24/04", 2027) == ["2027-04-23", "2027-04-24"]
+
+
+def test_apply_request(cfg):
+    r = fw.apply_request(cfg, "23/04", "01/05", 3, 17)
+    assert fw.date_pairs(r) == [("2027-04-23", "2027-05-01")]
+    assert fw.earliest_hour(r, "2027-04-23") == 17 and fw.earliest_hour(r, "2027-04-24") == 0
+    assert r["alerts"]["summary_top_n"] == 3
+    assert cfg["dates"]["outbound"] == ["2027-04-25", "2027-04-26"]   # o original não muda
+
+
+def test_earliest_hour_from_yaml_date_keys(cfg):
+    import datetime
+    cfg["dates"]["earliest_departure"] = {datetime.date(2027, 4, 23): 17}   # o YAML lê datas assim
+    assert fw.earliest_hour(cfg, "2027-04-23") == 17
+
+
+def test_per_pair_gives_several_options(cfg):
+    legs = [leg("OPO", "AMS", "2027-04-25", 100), leg("OPO", "NRN", "2027-04-25", 60),
+            leg("AMS", "OPO", "2027-04-28", 70), leg("NRN", "OPO", "2027-04-28", 50)]
+    assert len(fw.build_trips(legs, cfg)) == 1
+    trips = fw.build_trips(legs, cfg, per_pair=3)
+    assert [t.total for t in trips] == [160, 170, 170]
+
+
+def test_request_sends_top_n_and_keeps_state(cfg, tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    r = fw.apply_request(cfg, "25/04", "28/04", 2, None)
+    fetch = fake_fetch({("OPO", "NRN"): 60, ("OPO", "AMS"): 120, ("AMS", "OPO"): 70, ("NRN", "OPO"): 200})
+    state = tmp_path / "s.json"
+    fw.run(r, fetch=fetch, state_path=state, history_path=tmp_path / "h.csv",
+           sleep=lambda s: None, request="teste")
+    assert len(sent) == 1 and "Pedido: teste" in sent[0] and sent[0].count("✈️") == 2
+    assert not state.exists()
+
+
+def test_request_with_no_flights_says_so(cfg, tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    fw.run(cfg, fetch=fake_fetch({}), state_path=tmp_path / "s.json", history_path=tmp_path / "h.csv",
+           sleep=lambda s: None, request="vazio")
+    assert "Não encontrei" in sent[0]

@@ -15,6 +15,10 @@ Uso:
     python src/flightwatch.py --dry-run      # não envia nada ao Discord, só imprime
     python src/flightwatch.py --summary      # envia o top N mais baratos (resumo diário)
     python src/flightwatch.py --test-discord # envia uma mensagem de teste ao webhook
+
+Pedido à medida (manda os N melhores para essas datas, sem mexer nos alertas):
+    python src/flightwatch.py --ida 23/04 --volta 01/05 --top 3 --hora 17
+    python src/flightwatch.py --ida "23/04 a 24/04" --volta "30/04 a 01/05"
 """
 from __future__ import annotations
 
@@ -55,6 +59,7 @@ class Leg:
     stops: int           # escalas na ida
     currency: str
     ret_day: str | None = None
+    depart: str = ""     # HH:MM de partida do primeiro voo da ida
 
     @property
     def key(self) -> str:
@@ -142,47 +147,79 @@ def build_searches(cfg: dict) -> list[tuple[str, str, str, str | None]]:
     return searches[:limit] if limit else searches
 
 
+def parse_day(text: str, year: int) -> str:
+    """'23/04', '23/04/2027' ou '2027-04-23' -> '2027-04-23'."""
+    text = text.strip()
+    if "-" in text:
+        return date.fromisoformat(text).isoformat()
+    parts = [int(x) for x in text.split("/")]
+    d, m = parts[0], parts[1]
+    y = parts[2] if len(parts) > 2 else year
+    return date(y + 2000 if y < 100 else y, m, d).isoformat()
+
+
+def parse_span(text: str, year: int) -> list[str]:
+    """'23/04' ou '23/04 a 24/04' -> [início, fim]."""
+    parts = [x for x in text.replace(" até ", " a ").split(" a ") if x.strip()]
+    days = [parse_day(x, year) for x in parts]
+    return [days[0], days[-1]]
+
+
+def apply_request(cfg: dict, ida: str, volta: str, top: int, hora: int | None) -> dict:
+    """Config para um pedido à medida: só essas datas, top N, hora mínima de
+    partida na ida (aplica-se a todos os dias de ida do pedido)."""
+    year = date.fromisoformat(str(cfg["dates"]["outbound"][0])).year
+    out, ret = parse_span(ida, year), parse_span(volta, year)
+    earliest = {d: hora for d in daterange(*out)} if hora is not None else {}
+    return {
+        **cfg,
+        "dates": {"outbound": out, "return": ret, "min_nights": 1, "max_nights": 60,
+                  "earliest_departure": earliest},
+        "alerts": {**cfg["alerts"], "summary_top_n": top},
+        "max_queries_per_run": None,
+    }
+
+
+def earliest_hour(cfg: dict, day: str) -> int:
+    """Hora mínima de partida na ida para esse dia (0 = qualquer hora)."""
+    rules = {str(k): v for k, v in (cfg["dates"].get("earliest_departure") or {}).items()}
+    return int(rules.get(day, 0))
+
+
 def ground_cost(cfg: dict, airport: str) -> float:
     return float(cfg["airports"][airport].get("ground_cost", 0))
 
 
-def build_trips(legs: list[Leg], cfg: dict) -> list[Trip]:
-    """A viagem mais barata (voos + comboio) para cada par de datas válido.
+def build_trips(legs: list[Leg], cfg: dict, per_pair: int = 1) -> list[Trip]:
+    """As `per_pair` viagens mais baratas (voos + comboio) para cada par de
+    datas válido, todas juntas e ordenadas por preço.
 
     A ida e a volta são escolhidas de forma independente, por isso podem ser
     de aeroportos e companhias diferentes. Um bilhete de ida e volta na mesma
     companhia ganha se custar o mesmo ou menos.
     """
     origin = cfg["origin"]
-    best_out: dict[str, tuple[float, Leg]] = {}
-    best_ret: dict[str, tuple[float, Leg]] = {}
-    best_rt: dict[tuple[str, str], tuple[float, Leg]] = {}
+    outs: dict[str, list[Leg]] = {}
+    rets: dict[str, list[Leg]] = {}
+    rts: dict[tuple[str, str], list[Leg]] = {}
     for leg in legs:
         if leg.ret_day:
-            cost, pair = leg.price + 2 * ground_cost(cfg, leg.to), (leg.day, leg.ret_day)
-            if pair not in best_rt or cost < best_rt[pair][0]:
-                best_rt[pair] = (cost, leg)
-            continue
-        if leg.frm == origin:
-            cost, table = leg.price + ground_cost(cfg, leg.to), best_out
+            rts.setdefault((leg.day, leg.ret_day), []).append(leg)
+        elif leg.frm == origin:
+            outs.setdefault(leg.day, []).append(leg)
         else:
-            cost, table = leg.price + ground_cost(cfg, leg.frm), best_ret
-        if leg.day not in table or cost < table[leg.day][0]:
-            table[leg.day] = (cost, leg)
+            rets.setdefault(leg.day, []).append(leg)
 
     trips = []
     for o, r in date_pairs(cfg):
         options = []
-        if (o, r) in best_rt:
-            rt = best_rt[(o, r)][1]
+        for rt in rts.get((o, r), []):
             g = ground_cost(cfg, rt.to)
             options.append(Trip(rt, None, g, g))
-        if o in best_out and r in best_ret:
-            out, ret = best_out[o][1], best_ret[r][1]
+        for out, ret in itertools.product(outs.get(o, []), rets.get(r, [])):
             options.append(Trip(out, ret, ground_cost(cfg, out.to), ground_cost(cfg, ret.frm)))
-        if options:
-            # em caso de empate fica o de ida e volta (vem primeiro)
-            trips.append(min(options, key=lambda t: t.total))
+        # sort estável: em caso de empate fica o de ida e volta (vem primeiro)
+        trips += sorted(options, key=lambda t: t.total)[:per_pair]
     return sorted(trips, key=lambda t: t.total)
 
 
@@ -240,6 +277,8 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> L
         return None
 
     priced = [f for f in results if getattr(f, "price", 0) and f.price > 0]
+    if frm == cfg["origin"] and (min_hour := earliest_hour(cfg, day)):
+        priced = [f for f in priced if f.flights and f.flights[0].departure.time[0] >= min_hour]
     if not priced:
         return None
     best = min(priced, key=lambda f: f.price)
@@ -250,6 +289,7 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> L
         stops=max(len(best.flights) - 1, 0),
         currency=s["currency"],
         ret_day=ret,
+        depart="%02d:%02d" % tuple(best.flights[0].departure.time) if best.flights else "",
     )
 
 
@@ -304,6 +344,8 @@ def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
     names = cfg["airports"]
     other = leg.to if leg.frm == cfg["origin"] else leg.frm
     stops = "direto" if leg.stops == 0 else f"{leg.stops} escala(s)"
+    if leg.depart:
+        stops += f" · sai {leg.depart}"
     if leg.ret_day:
         line = (f"**{label}** {fmt_day(leg.day)} → {fmt_day(leg.ret_day)}: {leg.frm} ⇄ {leg.to} "
                 f"({names[other].get('name', other)}) · {leg.price:.0f} {leg.currency} · {leg.airlines} · "
@@ -370,7 +412,10 @@ def send_discord(text: str, dry_run: bool = False) -> None:
 # ---------------------------------------------------------------- execução
 def run(cfg: dict, dry_run: bool = False, summary: bool = False,
         fetch=fetch_cheapest, state_path: Path = STATE_PATH,
-        history_path: Path = HISTORY_PATH, sleep=time.sleep) -> int:
+        history_path: Path = HISTORY_PATH, sleep=time.sleep,
+        request: str | None = None) -> int:
+    """`request`: título de um pedido à medida. Manda o top N para o Discord
+    (mesmo que não haja nada) e não mexe no estado dos alertas."""
     searches = build_searches(cfg)
     print(f"{len(searches)} pesquisas a fazer")
     state = load_state(state_path)
@@ -398,10 +443,17 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
     if not dry_run:
         append_history(legs, now, history_path)
 
-    trips = build_trips(legs, cfg)
+    trips = build_trips(legs, cfg, per_pair=cfg["alerts"]["summary_top_n"] if request else 1)
     for t in trips:
         how = f"ida e volta {t.out.to}" if t.ret is None else f"{t.out.to} / {t.ret.frm}"
         print(f"  viagem {t.key}: {t.total:.0f} ({how})")
+
+    if request:
+        top = trips[: cfg["alerts"]["summary_top_n"]]
+        body = f"🔎 **Pedido: {request}** (voos + comboio, por pessoa)\n\n"
+        body += "\n\n".join(format_alert(t, cfg) for t in top) if top else "Não encontrei voos para essas datas."
+        send_discord(body, dry_run)
+        return 0
 
     if summary:
         top = trips[: cfg["alerts"]["summary_top_n"]]
@@ -447,12 +499,27 @@ def main() -> int:
     p.add_argument("--summary", action="store_true", help="envia o top N em vez de alertas")
     p.add_argument("--test-discord", action="store_true", help="envia mensagem de teste")
     p.add_argument("--config", default=str(CONFIG_PATH))
+    p.add_argument("--ida", help="pedido à medida: dia ou intervalo de ida, ex. '23/04' ou '23/04 a 24/04'")
+    p.add_argument("--volta", help="pedido à medida: dia ou intervalo de volta")
+    p.add_argument("--top", type=int, default=3, help="pedido à medida: quantas viagens mostrar")
+    p.add_argument("--hora", type=int, help="pedido à medida: só idas a partir desta hora (ex. 17)")
     args = p.parse_args()
 
     if args.test_discord:
         send_discord("✅ Koningsdag flight watch: ligação ao Discord a funcionar.")
         return 0
-    return run(load_config(Path(args.config)), dry_run=args.dry_run, summary=args.summary)
+    cfg = load_config(Path(args.config))
+    if args.ida or args.volta:
+        if not (args.ida and args.volta):
+            p.error("--ida e --volta têm de ir juntos")
+        cfg = apply_request(cfg, args.ida, args.volta, args.top, args.hora)
+        d = cfg["dates"]
+        span = lambda a, b: fmt_day(a) if a == b else f"{fmt_day(a)} a {fmt_day(b)}"  # noqa: E731
+        title = f"{span(*d['outbound'])} → {span(*d['return'])}, top {args.top}"
+        if args.hora is not None:
+            title += f", ida a partir das {args.hora}h"
+        return run(cfg, dry_run=args.dry_run, request=title)
+    return run(cfg, dry_run=args.dry_run, summary=args.summary)
 
 
 if __name__ == "__main__":

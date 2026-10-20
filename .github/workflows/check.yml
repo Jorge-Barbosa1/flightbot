@@ -6,13 +6,29 @@ on:
     - cron: "30 8 * * *"          # resumo diário (UTC)
   workflow_dispatch:
     inputs:
+      ida:
+        description: "Pedido à medida - dia(s) de ida, ex. 23/04 ou 23/04 a 24/04 (vazio = corrida normal)"
+        type: string
+        default: ""
+      volta:
+        description: "Pedido à medida - dia(s) de volta, ex. 01/05 ou 30/04 a 01/05"
+        type: string
+        default: ""
+      top:
+        description: "Pedido à medida - quantas viagens mostrar"
+        type: string
+        default: "3"
+      hora:
+        description: "Pedido à medida - só idas a partir desta hora, ex. 17 (vazio = qualquer hora)"
+        type: string
+        default: ""
       summary:
-        description: "Enviar resumo em vez de alertas"
+        description: "Corrida normal: enviar resumo em vez de alertas"
         type: boolean
         default: false
 
 permissions:
-  contents: write   # para guardar data/state.json e data/history.csv
+  contents: write   # para guardar data/state.json e data/legs.csv
 
 concurrency:
   group: flight-watch
@@ -33,8 +49,14 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           IS_SUMMARY: ${{ (github.event.schedule == '30 8 * * *') || (github.event_name == 'workflow_dispatch' && inputs.summary) }}
+          IDA: ${{ inputs.ida }}
+          VOLTA: ${{ inputs.volta }}
+          TOP: ${{ inputs.top }}
+          HORA: ${{ inputs.hora }}
         run: |
-          if [ "$IS_SUMMARY" = "true" ]; then
+          if [ -n "$IDA" ]; then
+            python src/flightwatch.py --ida "$IDA" --volta "$VOLTA" --top "${TOP:-3}" ${HORA:+--hora "$HORA"}
+          elif [ "$IS_SUMMARY" = "true" ]; then
             python src/flightwatch.py --summary
           else
             python src/flightwatch.py
@@ -44,4 +66,4 @@ jobs:
           git config user.name "flightwatch-bot"
           git config user.email "flightwatch-bot@users.noreply.github.com"
           git add data
-          git diff --cached --quiet || (git commit -m "data: atualizar preços" && git push)
+          git diff --cached --quiet || (git commit -m "data: atualizar preços" && git pull --rebase -q && git push)

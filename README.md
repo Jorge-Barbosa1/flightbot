@@ -57,6 +57,20 @@ Se o passo 4 mostrar preços, está tudo bem. Se der erro/sem resultados, vai a 
 corre no teu PC/Raspberry com cron (`0 */6 * * * cd /caminho && .venv/bin/python src/flightwatch.py`)
 ou muda o fornecedor (ver abaixo).
 
+## Pedidos à medida
+
+Para veres os melhores resultados para outras datas sem mexer nos alertas: no GitHub (ou na app
+do GitHub no telemóvel) vai a *Actions → flight-watch → Run workflow* e preenche:
+
+- **ida**: `23/04` ou um intervalo `23/04 a 24/04`
+- **volta**: `01/05` ou `30/04 a 01/05`
+- **top**: quantas viagens mostrar (por defeito 3)
+- **hora**: só idas a partir desta hora, ex. `17` (vazio = qualquer hora)
+
+A resposta chega ao Discord em 2-4 minutos. Pelo terminal:
+`gh workflow run flight-watch -f ida=23/04 -f volta=01/05 -f top=3 -f hora=17`
+(ou localmente: `python src/flightwatch.py --ida 23/04 --volta 01/05 --top 3 --hora 17`).
+
 ## Configuração
 
 Tudo em `config.yaml`: aeroportos e custo do comboio até Amesterdão, janelas de datas, nº de
