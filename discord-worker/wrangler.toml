@@ -1,0 +1,10 @@
+name = "flightwatch-discord"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+[vars]
+GITHUB_REPO = "Jorge-Barbosa1/koningsdag-flight-watch"
+GITHUB_REF = "master"
+
+# Segredos (não ficam aqui; definem-se com `npx wrangler secret put NOME`):
+#   DISCORD_PUBLIC_KEY, GITHUB_TOKEN, ALLOWED_USERS (opcional)

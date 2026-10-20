@@ -26,12 +26,18 @@ on:
         description: "Corrida normal: enviar resumo em vez de alertas"
         type: boolean
         default: false
+      pedido:
+        description: "Uso interno: pedido do comando /flight do Discord (JSON). Deixa vazio."
+        type: string
+        default: ""
 
 permissions:
   contents: write   # para guardar data/state.json e data/legs.csv
 
 concurrency:
-  group: flight-watch
+  # os pedidos do Discord correm à parte, para não ficarem à espera (nem serem
+  # substituídos) atrás das corridas agendadas
+  group: ${{ inputs.pedido != '' && format('pedido-{0}', github.run_id) || 'flight-watch' }}
   cancel-in-progress: false
 
 jobs:
@@ -53,8 +59,12 @@ jobs:
           VOLTA: ${{ inputs.volta }}
           TOP: ${{ inputs.top }}
           HORA: ${{ inputs.hora }}
+          PEDIDO: ${{ inputs.pedido }}
         run: |
-          if [ -n "$IDA" ]; then
+          if [ -n "$PEDIDO" ]; then
+            echo "::add-mask::$(echo "$PEDIDO" | jq -r '.token // empty')"
+            python src/flightwatch.py --pedido-json "$PEDIDO"
+          elif [ -n "$IDA" ]; then
             python src/flightwatch.py --ida "$IDA" --volta "$VOLTA" --top "${TOP:-3}" ${HORA:+--hora "$HORA"}
           elif [ "$IS_SUMMARY" = "true" ]; then
             python src/flightwatch.py --summary

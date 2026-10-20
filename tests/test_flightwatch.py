@@ -175,20 +175,56 @@ def test_split_message_never_cuts_a_trip():
     assert fw.split_message("y" * 4000) == ["y" * 1900, "y" * 1900, "y" * 200]
 
 
+TODAY = __import__("datetime").date(2026, 10, 20)
+
+
 def test_parse_dates():
-    assert fw.parse_day("23/04", 2027) == "2027-04-23"
-    assert fw.parse_day("1/5/27", 2027) == "2027-05-01"
-    assert fw.parse_day("2027-04-23", 2026) == "2027-04-23"
-    assert fw.parse_span("23/04", 2027) == ["2027-04-23", "2027-04-23"]
-    assert fw.parse_span("23/04 a 24/04", 2027) == ["2027-04-23", "2027-04-24"]
+    assert fw.parse_day("23/04", TODAY) == "2027-04-23"          # próxima ocorrência
+    assert fw.parse_day("23/10", TODAY) == "2026-10-23"
+    assert fw.parse_day("1/5/27") == "2027-05-01"
+    assert fw.parse_day("2027-04-23") == "2027-04-23"
+    assert fw.parse_span("23/04", TODAY) == ["2027-04-23", "2027-04-23"]
+    assert fw.parse_span("23/04 a 24/04", TODAY) == ["2027-04-23", "2027-04-24"]
 
 
 def test_apply_request(cfg):
-    r = fw.apply_request(cfg, "23/04", "01/05", 3, 17)
+    r = fw.apply_request(cfg, "23/04", "01/05", 3, 17, today=TODAY)
     assert fw.date_pairs(r) == [("2027-04-23", "2027-05-01")]
     assert fw.earliest_hour(r, "2027-04-23") == 17 and fw.earliest_hour(r, "2027-04-24") == 0
     assert r["alerts"]["summary_top_n"] == 3
     assert cfg["dates"]["outbound"] == ["2027-04-25", "2027-04-26"]   # o original não muda
+
+
+def test_request_other_destination_with_words(cfg):
+    r = fw.apply_request(cfg, "tarde 23/10/2026", "early 25/10/2026", 3, None, destino="Madrid")
+    assert r["airports"] == {"MAD": {"name": "MAD", "ground_cost": 0}}
+    assert fw.date_pairs(r) == [("2026-10-23", "2026-10-25")]
+    assert fw.earliest_hour(r, "2026-10-23") == fw.LATE_HOUR
+    assert fw.latest_arrival(r, "2026-10-25") == fw.EARLY_HOUR
+    assert r["roundtrip_airports"] == []          # com hora de chegada não dá para usar ida e volta
+    assert [s[:2] for s in fw.build_searches(r)] == [("OPO", "MAD"), ("MAD", "OPO")]
+
+
+def test_resolve_airports():
+    assert fw.resolve_airports("Londres") == ["LHR", "LGW", "STN", "LTN"]
+    assert fw.resolve_airports("mad, bcn") == ["MAD", "BCN"]
+    with pytest.raises(ValueError):
+        fw.resolve_airports("Atlântida")
+
+
+def test_bad_request_dates(cfg):
+    with pytest.raises(ValueError):
+        fw.apply_request(cfg, "25/10/2026", "23/10/2026", 3, None, destino="MAD")
+
+
+def test_arrives_by():
+    class A:
+        date, time = (2026, 10, 25), (14, 59)
+    assert fw.arrives_by(A, "2026-10-25", 15)
+    A.time = (15, 1)
+    assert not fw.arrives_by(A, "2026-10-25", 15)
+    A.date, A.time = (2026, 10, 26), (8, 0)                          # chega no dia seguinte
+    assert not fw.arrives_by(A, "2026-10-25", 15)
 
 
 def test_earliest_hour_from_yaml_date_keys(cfg):
@@ -208,7 +244,7 @@ def test_per_pair_gives_several_options(cfg):
 def test_request_sends_top_n_and_keeps_state(cfg, tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
-    r = fw.apply_request(cfg, "25/04", "28/04", 2, None)
+    r = fw.apply_request(cfg, "25/04", "28/04", 2, None, today=TODAY)
     fetch = fake_fetch({("OPO", "NRN"): 60, ("OPO", "AMS"): 120, ("AMS", "OPO"): 70, ("NRN", "OPO"): 200})
     state = tmp_path / "s.json"
     fw.run(r, fetch=fetch, state_path=state, history_path=tmp_path / "h.csv",

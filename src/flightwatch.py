@@ -19,6 +19,8 @@ Uso:
 Pedido à medida (manda os N melhores para essas datas, sem mexer nos alertas):
     python src/flightwatch.py --ida 23/04 --volta 01/05 --top 3 --hora 17
     python src/flightwatch.py --ida "23/04 a 24/04" --volta "30/04 a 01/05"
+    python src/flightwatch.py --destino Madrid --ida "tarde 23/10" --volta "cedo 25/10"
+    python src/flightwatch.py --pedido-json '{"destino": "MAD", "ida": "23/10", ...}'  # vindo do Discord
 """
 from __future__ import annotations
 
@@ -59,7 +61,8 @@ class Leg:
     stops: int           # escalas na ida
     currency: str
     ret_day: str | None = None
-    depart: str = ""     # HH:MM de partida do primeiro voo da ida
+    depart: str = ""     # HH:MM de partida do primeiro voo
+    arrive: str = ""     # HH:MM de chegada do último voo (só nos voos só de ida)
 
     @property
     def key(self) -> str:
@@ -147,43 +150,136 @@ def build_searches(cfg: dict) -> list[tuple[str, str, str, str | None]]:
     return searches[:limit] if limit else searches
 
 
-def parse_day(text: str, year: int) -> str:
-    """'23/04', '23/04/2027' ou '2027-04-23' -> '2027-04-23'."""
+def parse_day(text: str, today: date | None = None) -> str:
+    """'23/04', '23/04/2027' ou '2027-04-23' -> '2027-04-23'. Sem ano, usa a
+    próxima vez que esse dia acontece (a contar de hoje)."""
     text = text.strip()
     if "-" in text:
         return date.fromisoformat(text).isoformat()
     parts = [int(x) for x in text.split("/")]
     d, m = parts[0], parts[1]
-    y = parts[2] if len(parts) > 2 else year
-    return date(y + 2000 if y < 100 else y, m, d).isoformat()
+    if len(parts) > 2:
+        y = parts[2]
+        return date(y + 2000 if y < 100 else y, m, d).isoformat()
+    today = today or date.today()
+    candidate = date(today.year, m, d)
+    return (candidate if candidate >= today else date(today.year + 1, m, d)).isoformat()
 
 
-def parse_span(text: str, year: int) -> list[str]:
+# palavras que se podem escrever junto às datas (ex. "tarde 23/10", "early 25/10")
+LATE_WORDS = {"tarde", "late", "noite", "night", "evening"}
+EARLY_WORDS = {"cedo", "early", "manha", "manhã", "morning"}
+LATE_HOUR = 17       # "tarde" na ida = sair a partir das 17h
+EARLY_HOUR = 15      # "cedo" na volta = chegar a casa até às 15h
+
+
+def split_words(text: str) -> tuple[str, set[str]]:
+    """Separa as palavras-chave ('tarde', 'cedo'...) das datas."""
+    words, rest = set(), []
+    for tok in text.split():
+        if tok.lower() in LATE_WORDS | EARLY_WORDS:
+            words.add(tok.lower())
+        else:
+            rest.append(tok)
+    return " ".join(rest), words
+
+
+def parse_span(text: str, today: date | None = None) -> list[str]:
     """'23/04' ou '23/04 a 24/04' -> [início, fim]."""
     parts = [x for x in text.replace(" até ", " a ").split(" a ") if x.strip()]
-    days = [parse_day(x, year) for x in parts]
+    days = [parse_day(x, today) for x in parts]
     return [days[0], days[-1]]
 
 
-def apply_request(cfg: dict, ida: str, volta: str, top: int, hora: int | None) -> dict:
-    """Config para um pedido à medida: só essas datas, top N, hora mínima de
-    partida na ida (aplica-se a todos os dias de ida do pedido)."""
-    year = date.fromisoformat(str(cfg["dates"]["outbound"][0])).year
-    out, ret = parse_span(ida, year), parse_span(volta, year)
-    earliest = {d: hora for d in daterange(*out)} if hora is not None else {}
-    return {
-        **cfg,
-        "dates": {"outbound": out, "return": ret, "min_nights": 1, "max_nights": 60,
-                  "earliest_departure": earliest},
-        "alerts": {**cfg["alerts"], "summary_top_n": top},
-        "max_queries_per_run": None,
+# cidades mais comuns -> aeroportos (também se pode escrever o código, ex. MAD)
+CITY_AIRPORTS = {
+    "madrid": ["MAD"], "barcelona": ["BCN"], "sevilha": ["SVQ"], "valencia": ["VLC"], "valência": ["VLC"],
+    "malaga": ["AGP"], "málaga": ["AGP"], "palma": ["PMI"], "maiorca": ["PMI"], "ibiza": ["IBZ"],
+    "bilbau": ["BIO"], "bilbao": ["BIO"], "tenerife": ["TFS", "TFN"], "lisboa": ["LIS"], "porto": ["OPO"],
+    "faro": ["FAO"], "funchal": ["FNC"], "madeira": ["FNC"], "acores": ["PDL"], "açores": ["PDL"],
+    "londres": ["LHR", "LGW", "STN", "LTN"], "london": ["LHR", "LGW", "STN", "LTN"],
+    "paris": ["CDG", "ORY", "BVA"], "roma": ["FCO", "CIA"], "rome": ["FCO", "CIA"],
+    "milao": ["MXP", "LIN", "BGY"], "milão": ["MXP", "LIN", "BGY"], "milan": ["MXP", "LIN", "BGY"],
+    "veneza": ["VCE", "TSF"], "napoles": ["NAP"], "nápoles": ["NAP"], "bolonha": ["BLQ"],
+    "amesterdao": ["AMS", "EIN"], "amesterdão": ["AMS", "EIN"], "amsterdam": ["AMS", "EIN"],
+    "bruxelas": ["BRU", "CRL"], "brussels": ["BRU", "CRL"], "berlim": ["BER"], "berlin": ["BER"],
+    "munique": ["MUC"], "frankfurt": ["FRA", "HHN"], "colonia": ["CGN"], "colónia": ["CGN"],
+    "dusseldorf": ["DUS", "NRN"], "düsseldorf": ["DUS", "NRN"], "hamburgo": ["HAM"],
+    "dublin": ["DUB"], "edimburgo": ["EDI"], "manchester": ["MAN"], "zurique": ["ZRH"],
+    "genebra": ["GVA"], "basileia": ["BSL"], "viena": ["VIE"], "praga": ["PRG"], "budapeste": ["BUD"],
+    "cracovia": ["KRK"], "cracóvia": ["KRK"], "varsovia": ["WAW", "WMI"], "varsóvia": ["WAW", "WMI"],
+    "copenhaga": ["CPH"], "estocolmo": ["ARN"], "oslo": ["OSL"], "helsinquia": ["HEL"],
+    "atenas": ["ATH"], "istambul": ["IST", "SAW"], "marraquexe": ["RAK"], "nice": ["NCE"],
+    "lyon": ["LYS"], "marselha": ["MRS"], "toulouse": ["TLS"], "bordeus": ["BOD"], "nantes": ["NTE"],
+    "luxemburgo": ["LUX"], "malta": ["MLA"],
+}
+
+
+def resolve_airports(text: str) -> list[str]:
+    """'Madrid' -> ['MAD'], 'MAD' -> ['MAD'], 'MAD,BCN' -> ['MAD', 'BCN']."""
+    codes: list[str] = []
+    for part in text.replace(",", " ").replace("/", " ").split():
+        if part.lower() in CITY_AIRPORTS:
+            codes += CITY_AIRPORTS[part.lower()]
+        elif len(part) == 3 and part.isalpha():
+            codes.append(part.upper())
+        else:
+            raise ValueError(f"Não conheço '{part}'. Usa o código do aeroporto (ex. MAD, BCN, LHR).")
+    if not codes:
+        raise ValueError("Falta o destino.")
+    return list(dict.fromkeys(codes))
+
+
+def apply_request(cfg: dict, ida: str, volta: str, top: int, hora: int | None,
+                  destino: str | None = None, chegar_ate: int | None = None,
+                  origem: str | None = None, today: date | None = None) -> dict:
+    """Config para um pedido à medida: só essas datas, top N, e opcionalmente
+    outro destino/origem, hora mínima de partida na ida e hora máxima de
+    chegada a casa na volta. 'tarde' na ida e 'cedo' na volta também valem."""
+    ida, ida_words = split_words(ida)
+    volta, volta_words = split_words(volta)
+    if hora is None and ida_words & LATE_WORDS:
+        hora = LATE_HOUR
+    if chegar_ate is None and volta_words & EARLY_WORDS:
+        chegar_ate = EARLY_HOUR
+    out, ret = parse_span(ida, today), parse_span(volta, today)
+    if ret[-1] < out[0]:
+        raise ValueError("A volta é antes da ida.")
+
+    new = {**cfg}
+    if origem:
+        new["origin"] = resolve_airports(origem)[0]
+    if destino:
+        codes = resolve_airports(destino)
+        new["airports"] = {c: {"name": c, "ground_cost": 0} for c in codes}
+        new["roundtrip_airports"] = codes
+    if chegar_ate is not None:
+        # nos bilhetes de ida e volta o Google só diz a hora da ida: não dá para filtrar a volta
+        new["roundtrip_airports"] = []
+    new["dates"] = {
+        "outbound": out, "return": ret, "min_nights": 0, "max_nights": 60,
+        "earliest_departure": {d: hora for d in daterange(*out)} if hora is not None else {},
+        "latest_arrival": {d: chegar_ate for d in daterange(*ret)} if chegar_ate is not None else {},
     }
+    new["alerts"] = {**cfg["alerts"], "summary_top_n": top}
+    new["search"] = {**cfg["search"], "options_per_search": top}
+    new["max_queries_per_run"] = None
+    return new
+
+
+def _hour_rule(cfg: dict, name: str, day: str) -> int | None:
+    rules = {str(k): v for k, v in (cfg["dates"].get(name) or {}).items()}
+    return None if rules.get(day) is None else int(rules[day])
 
 
 def earliest_hour(cfg: dict, day: str) -> int:
     """Hora mínima de partida na ida para esse dia (0 = qualquer hora)."""
-    rules = {str(k): v for k, v in (cfg["dates"].get("earliest_departure") or {}).items()}
-    return int(rules.get(day, 0))
+    return _hour_rule(cfg, "earliest_departure", day) or 0
+
+
+def latest_arrival(cfg: dict, day: str) -> int | None:
+    """Hora máxima de chegada a casa na volta para esse dia (None = qualquer)."""
+    return _hour_rule(cfg, "latest_arrival", day)
 
 
 def ground_cost(cfg: dict, airport: str) -> float:
@@ -244,9 +340,10 @@ def _consent_fetcher():
     return ConsentFetcher()
 
 
-def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> Leg | None:
-    """Pesquisa no Google Flights (via fast-flights) e devolve o voo mais
-    barato: só ida, ou ida e volta se `ret` estiver preenchido.
+def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> list[Leg]:
+    """Pesquisa no Google Flights (via fast-flights) e devolve os voos mais
+    baratos (`search.options_per_search`, por defeito só 1): só ida, ou ida e
+    volta se `ret` estiver preenchido.
 
     Para trocar de fornecedor (ex.: SerpApi), basta substituir esta função por
     outra que devolva um Leg ou None. O resto do código não muda.
@@ -270,27 +367,41 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> L
     try:
         results = get_flights(q, integration=_consent_fetcher())
     except FlightsNotFound:
-        return None
+        return []
     except TypeError:
         # o parser rebenta assim quando a página vem sem voos (ex.: a Ryanair
         # não voa nesse dia). Um bloqueio do Google dá outro erro e é contado.
-        return None
+        return []
 
     priced = [f for f in results if getattr(f, "price", 0) and f.price > 0]
     if frm == cfg["origin"] and (min_hour := earliest_hour(cfg, day)):
         priced = [f for f in priced if f.flights and f.flights[0].departure.time[0] >= min_hour]
-    if not priced:
-        return None
-    best = min(priced, key=lambda f: f.price)
-    return Leg(
-        frm=frm, to=to, day=day,
-        price=float(best.price),
-        airlines=", ".join(best.airlines),
-        stops=max(len(best.flights) - 1, 0),
-        currency=s["currency"],
-        ret_day=ret,
-        depart="%02d:%02d" % tuple(best.flights[0].departure.time) if best.flights else "",
-    )
+    if frm != cfg["origin"] and (max_hour := latest_arrival(cfg, day)) is not None:
+        priced = [f for f in priced if f.flights and arrives_by(f.flights[-1].arrival, day, max_hour)]
+    legs: list[Leg] = []
+    for f in sorted(priced, key=lambda f: f.price):
+        leg = Leg(
+            frm=frm, to=to, day=day,
+            price=float(f.price),
+            airlines=", ".join(f.airlines),
+            stops=max(len(f.flights) - 1, 0),
+            currency=s["currency"],
+            ret_day=ret,
+            depart="%02d:%02d" % tuple(f.flights[0].departure.time) if f.flights else "",
+            arrive="" if ret or not f.flights else "%02d:%02d" % tuple(f.flights[-1].arrival.time),
+        )
+        if leg not in legs:          # o Google às vezes repete o mesmo voo
+            legs.append(leg)
+        if len(legs) >= s.get("options_per_search", 1):
+            break
+    return legs
+
+
+def arrives_by(arrival, day: str, max_hour: int) -> bool:
+    """Chega no próprio dia até às `max_hour`:00?"""
+    y, m, d = arrival.date
+    h, mi = arrival.time
+    return date(y, m, d).isoformat() == day and (h, mi) <= (max_hour, 0)
 
 
 # ---------------------------------------------------------------- estado
@@ -343,22 +454,26 @@ def fmt_day(d: str) -> str:
 def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
     names = cfg["airports"]
     other = leg.to if leg.frm == cfg["origin"] else leg.frm
+    name = names.get(other, {}).get("name", other)
+    where = f" ({name})" if name != other else ""
     stops = "direto" if leg.stops == 0 else f"{leg.stops} escala(s)"
     if leg.depart:
         stops += f" · sai {leg.depart}"
+    if leg.arrive and leg.frm != cfg["origin"]:
+        stops += f", chega {leg.arrive}"
     if leg.ret_day:
-        line = (f"**{label}** {fmt_day(leg.day)} → {fmt_day(leg.ret_day)}: {leg.frm} ⇄ {leg.to} "
-                f"({names[other].get('name', other)}) · {leg.price:.0f} {leg.currency} · {leg.airlines} · "
+        line = (f"**{label}** {fmt_day(leg.day)} → {fmt_day(leg.ret_day)}: {leg.frm} ⇄ {leg.to}{where} · "
+                f"{leg.price:.0f} {leg.currency} · {leg.airlines} · "
                 f"{stops} na ida")
     else:
-        line = (f"**{label}** {fmt_day(leg.day)}: {leg.frm} → {leg.to} ({names[other].get('name', other)}) · "
+        line = (f"**{label}** {fmt_day(leg.day)}: {leg.frm} → {leg.to}{where} · "
                 f"{leg.price:.0f} {leg.currency} · {leg.airlines} · {stops}")
     # link mascarado; os <> evitam a pré-visualização gigante do Discord
     line += f" · [ver no Google Flights](<{leg.google_flights_url()}>)"
     if ground:
         each_way = " (cada sentido)" if leg.ret_day else ""
         line += (f"\n  + comboio/autocarro{each_way} ≈ {ground:.0f} {leg.currency} · "
-                 f"{names[other].get('ground_time', '')}")
+                 f"{names.get(other, {}).get('ground_time', '')}")
     return line
 
 
@@ -400,7 +515,8 @@ def send_discord(text: str, dry_run: bool = False) -> None:
     if dry_run:
         print("[dry-run] Discord:\n" + text + "\n")
         return
-    url = os.environ.get("DISCORD_WEBHOOK_URL")
+    # DISCORD_REPLY_URL: resposta a um comando /flight (vai para quem perguntou)
+    url = os.environ.get("DISCORD_REPLY_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
     if not url:
         raise RuntimeError("Falta a variável de ambiente DISCORD_WEBHOOK_URL")
     for chunk in split_message(text):
@@ -425,13 +541,14 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
     failures = 0
     for frm, to, day, ret in searches:
         try:
-            leg = fetch(frm, to, day, ret, cfg)
+            found = fetch(frm, to, day, ret, cfg)
         except Exception as e:  # noqa: BLE001 - não queremos parar tudo por uma pesquisa
             failures += 1
             print(f"  ! {frm}-{to} {day}{'->' + ret if ret else ''}: {type(e).__name__}: {str(e)[:120]}")
             sleep(cfg["search"]["delay_seconds"])
             continue
-        if leg:
+        found = found if isinstance(found, list) else [found] if found else []
+        for leg in found:
             legs.append(leg)
             print(f"  {leg.key}: {leg.price:.0f} {leg.currency} ({leg.airlines})")
         sleep(cfg["search"]["delay_seconds"])
@@ -450,7 +567,9 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
 
     if request:
         top = trips[: cfg["alerts"]["summary_top_n"]]
-        body = f"🔎 **Pedido: {request}** (voos + comboio, por pessoa)\n\n"
+        extra = " (voos + comboio, por pessoa)" if any(ground_cost(cfg, a) for a in cfg["airports"]) \
+            else " (por pessoa)"
+        body = f"🔎 **Pedido: {request}**{extra}\n\n"
         body += "\n\n".join(format_alert(t, cfg) for t in top) if top else "Não encontrei voos para essas datas."
         send_discord(body, dry_run)
         return 0
@@ -503,23 +622,56 @@ def main() -> int:
     p.add_argument("--volta", help="pedido à medida: dia ou intervalo de volta")
     p.add_argument("--top", type=int, default=3, help="pedido à medida: quantas viagens mostrar")
     p.add_argument("--hora", type=int, help="pedido à medida: só idas a partir desta hora (ex. 17)")
+    p.add_argument("--chegar-ate", type=int, help="pedido à medida: voltas a chegar a casa até esta hora")
+    p.add_argument("--destino", help="pedido à medida: cidade ou código(s), ex. Madrid ou MAD,BCN")
+    p.add_argument("--origem", help="pedido à medida: aeroporto de partida (por defeito o do config)")
+    p.add_argument("--pedido-json", help="pedido vindo do Discord (/flight), em JSON")
     args = p.parse_args()
 
     if args.test_discord:
         send_discord("✅ Koningsdag flight watch: ligação ao Discord a funcionar.")
         return 0
     cfg = load_config(Path(args.config))
-    if args.ida or args.volta:
-        if not (args.ida and args.volta):
-            p.error("--ida e --volta têm de ir juntos")
-        cfg = apply_request(cfg, args.ida, args.volta, args.top, args.hora)
-        d = cfg["dates"]
-        span = lambda a, b: fmt_day(a) if a == b else f"{fmt_day(a)} a {fmt_day(b)}"  # noqa: E731
-        title = f"{span(*d['outbound'])} → {span(*d['return'])}, top {args.top}"
-        if args.hora is not None:
-            title += f", ida a partir das {args.hora}h"
-        return run(cfg, dry_run=args.dry_run, request=title)
+
+    if args.pedido_json:
+        req = json.loads(args.pedido_json)
+        if req.get("app_id") and req.get("token"):
+            os.environ["DISCORD_REPLY_URL"] = (
+                f"https://discord.com/api/v10/webhooks/{req['app_id']}/{req['token']}")
+        args.ida, args.volta = req.get("ida"), req.get("volta")
+        args.destino, args.origem = req.get("destino"), req.get("origem")
+        args.top = int(req.get("top") or 3)
+        args.hora = None if req.get("sair_depois") in (None, "") else int(req["sair_depois"])
+        args.chegar_ate = None if req.get("chegar_ate") in (None, "") else int(req["chegar_ate"])
+
+    if args.ida or args.volta or args.destino:
+        try:
+            if not (args.ida and args.volta):
+                raise ValueError("Faltam as datas de ida e de volta.")
+            cfg = apply_request(cfg, args.ida, args.volta, args.top, args.hora,
+                                destino=args.destino, chegar_ate=args.chegar_ate, origem=args.origem)
+        except ValueError as e:
+            send_discord(f"❌ {e}", args.dry_run)
+            return 1
+        return run(cfg, dry_run=args.dry_run, request=request_title(cfg, args.destino))
     return run(cfg, dry_run=args.dry_run, summary=args.summary)
+
+
+def request_title(cfg: dict, destino: str | None) -> str:
+    d = cfg["dates"]
+
+    def span(a: str, b: str) -> str:
+        return fmt_day(a) if a == b else f"{fmt_day(a)} a {fmt_day(b)}"
+
+    where = f"{cfg['origin']} ⇄ {', '.join(cfg['airports'])}" if destino else "Koningsdag"
+    title = f"{where}, {span(*d['outbound'])} → {span(*d['return'])}, top {cfg['alerts']['summary_top_n']}"
+    hours = {v for v in d.get("earliest_departure", {}).values()}
+    if hours:
+        title += f", ida a partir das {hours.pop()}h"
+    hours = {v for v in d.get("latest_arrival", {}).values()}
+    if hours:
+        title += f", volta a chegar até às {hours.pop()}h"
+    return title
 
 
 if __name__ == "__main__":

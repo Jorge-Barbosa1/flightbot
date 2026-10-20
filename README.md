@@ -71,6 +71,48 @@ A resposta chega ao Discord em 2-4 minutos. Pelo terminal:
 `gh workflow run flight-watch -f ida=23/04 -f volta=01/05 -f top=3 -f hora=17`
 (ou localmente: `python src/flightwatch.py --ida 23/04 --volta 01/05 --top 3 --hora 17`).
 
+## Comando /flight no Discord
+
+Escreves no Discord, por exemplo:
+
+```
+/flight destino:Madrid ida:tarde 23/10 volta:cedo 25/10
+/flight destino:Londres ida:23/10 volta:25/10 sair_depois:18 chegar_ate:14 top:5
+```
+
+- **destino**: cidade (Madrid, Londres, Paris, Amesterdão…) ou código(s) de aeroporto (`MAD`, `MAD,BCN`)
+- **ida / volta**: `23/10`, `23/10/2026` ou um intervalo `23/10 a 24/10`. Sem ano, usa a próxima vez
+  que esse dia acontece. `tarde` na ida = sair a partir das 17h; `cedo` na volta = chegar até às 15h.
+- **sair_depois / chegar_ate**: horas exatas, se quiseres outras que não 17h/15h
+- **top** (por defeito 3) e **origem** (por defeito OPO)
+
+O bot responde logo "a procurar…" e 1-3 minutos depois aparecem as opções por baixo.
+
+**Como funciona:** Discord → Cloudflare Worker (`discord-worker/`, grátis, sempre ligado) →
+GitHub Actions (`workflow_dispatch` com o pedido) → o script responde à interação do Discord.
+
+### Configurar (uma vez)
+
+1. **App do Discord**: <https://discord.com/developers/applications> → *New Application*.
+   Guarda o *Application ID* e a *Public Key* (General Information). Em *Bot* → *Reset Token*,
+   guarda o token (só serve para registar o comando).
+2. **Token do GitHub**: <https://github.com/settings/personal-access-tokens/new> → fine-grained,
+   só o repo `koningsdag-flight-watch`, permissão *Actions: Read and write*.
+3. **Cloudflare** (conta grátis em <https://dash.cloudflare.com/sign-up>):
+   ```bash
+   cd discord-worker
+   npx wrangler@4 login
+   npx wrangler@4 deploy                         # dá o URL do worker
+   npx wrangler@4 secret put DISCORD_PUBLIC_KEY
+   npx wrangler@4 secret put GITHUB_TOKEN
+   npx wrangler@4 secret put ALLOWED_USERS       # opcional: o teu ID do Discord
+   ```
+4. No portal do Discord, *General Information* → **Interactions Endpoint URL** = URL do worker → *Save*.
+5. Registar o comando: `DISCORD_APP_ID=... DISCORD_BOT_TOKEN=... python discord-worker/register_commands.py`
+6. Adicionar a app ao servidor: `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=applications.commands`
+
+Testes do worker: `node discord-worker/test.mjs`.
+
 ## Configuração
 
 Tudo em `config.yaml`: aeroportos e custo do comboio até Amesterdão, janelas de datas, nº de
