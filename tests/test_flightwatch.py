@@ -395,3 +395,22 @@ def test_format_arrival_next_day():
     assert fw.format_arrival(A, "2026-11-15") == "08:10 (+1 dia)"
     A.date = (2026, 11, 15)
     assert fw.format_arrival(A, "2026-11-15") == "08:10"
+
+
+def test_countries():
+    assert fw.resolve_airports("Holanda") == ["AMS", "EIN", "RTM"]
+    assert fw.resolve_airports("Países  Baixos") == ["AMS", "EIN", "RTM"]
+    assert fw.resolve_airports("holanda, BRU") == ["AMS", "EIN", "RTM", "BRU"]
+    assert "MAD" in fw.resolve_airports("espanha")
+
+
+def test_country_request(cfg):
+    r = fw.apply_request(cfg, None, None, None, None, destino="Itália", quando="novembro", today=TODAY)
+    assert len(r["airports"]) == 8 and r["roundtrip_airports"] == ["FCO", "CIA", "MXP"]
+    assert fw.request_title(r, "Itália").startswith("OPO ⇄ Itália (FCO, CIA")
+
+
+def test_user_error_does_not_fail_workflow(cfg, tmp_path, discord):
+    rc = fw.handle_pedido(cfg, {"acao": "flight", "destino": "Atlântida", "ida": "1/11", "volta": "3/11"},
+                          today=TODAY, **watch_paths(tmp_path))
+    assert rc == 0 and discord[-1].startswith("❌")

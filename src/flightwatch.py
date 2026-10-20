@@ -273,19 +273,64 @@ CITY_AIRPORTS = {
 }
 
 
+# países -> aeroportos principais (os mais servidos a partir do Porto primeiro)
+COUNTRY_AIRPORTS = {
+    "holanda": ["AMS", "EIN", "RTM"], "países baixos": ["AMS", "EIN", "RTM"],
+    "paises baixos": ["AMS", "EIN", "RTM"], "netherlands": ["AMS", "EIN", "RTM"],
+    "espanha": ["MAD", "BCN", "AGP", "SVQ", "VLC", "PMI", "ALC", "BIO"],
+    "spain": ["MAD", "BCN", "AGP", "SVQ", "VLC", "PMI", "ALC", "BIO"],
+    "itália": ["FCO", "CIA", "MXP", "BGY", "VCE", "NAP", "BLQ", "PSA"],
+    "italia": ["FCO", "CIA", "MXP", "BGY", "VCE", "NAP", "BLQ", "PSA"],
+    "italy": ["FCO", "CIA", "MXP", "BGY", "VCE", "NAP", "BLQ", "PSA"],
+    "frança": ["CDG", "ORY", "BVA", "LYS", "NCE", "MRS", "TLS", "BOD", "NTE"],
+    "franca": ["CDG", "ORY", "BVA", "LYS", "NCE", "MRS", "TLS", "BOD", "NTE"],
+    "france": ["CDG", "ORY", "BVA", "LYS", "NCE", "MRS", "TLS", "BOD", "NTE"],
+    "reino unido": ["LHR", "LGW", "STN", "LTN", "MAN", "EDI", "BRS", "LPL"],
+    "inglaterra": ["LHR", "LGW", "STN", "LTN", "MAN", "BRS", "LPL"],
+    "uk": ["LHR", "LGW", "STN", "LTN", "MAN", "EDI", "BRS", "LPL"],
+    "escócia": ["EDI", "GLA"], "escocia": ["EDI", "GLA"],
+    "alemanha": ["BER", "MUC", "FRA", "DUS", "CGN", "HAM", "NRN", "STR"],
+    "germany": ["BER", "MUC", "FRA", "DUS", "CGN", "HAM", "NRN", "STR"],
+    "bélgica": ["BRU", "CRL"], "belgica": ["BRU", "CRL"], "belgium": ["BRU", "CRL"],
+    "suíça": ["GVA", "ZRH", "BSL"], "suica": ["GVA", "ZRH", "BSL"], "switzerland": ["GVA", "ZRH", "BSL"],
+    "irlanda": ["DUB"], "ireland": ["DUB"],
+    "portugal": ["LIS", "FAO", "FNC", "PDL"],
+    "polónia": ["KRK", "WAW", "WMI", "GDN", "WRO"], "polonia": ["KRK", "WAW", "WMI", "GDN", "WRO"],
+    "grécia": ["ATH", "SKG"], "grecia": ["ATH", "SKG"], "greece": ["ATH", "SKG"],
+    "áustria": ["VIE", "SZG"], "austria": ["VIE", "SZG"],
+    "chéquia": ["PRG"], "chequia": ["PRG"], "república checa": ["PRG"], "republica checa": ["PRG"],
+    "hungria": ["BUD"], "dinamarca": ["CPH", "BLL"], "suécia": ["ARN", "GOT"], "suecia": ["ARN", "GOT"],
+    "noruega": ["OSL"], "croácia": ["ZAG", "SPU", "DBV"], "croacia": ["ZAG", "SPU", "DBV"],
+    "marrocos": ["RAK", "CMN", "FEZ", "TNG"], "luxemburgo": ["LUX"], "malta": ["MLA"],
+}
+
+
 def resolve_airports(text: str) -> list[str]:
-    """'Madrid' -> ['MAD'], 'MAD' -> ['MAD'], 'MAD,BCN' -> ['MAD', 'BCN']."""
+    """'Madrid' -> ['MAD'], 'MAD' -> ['MAD'], 'MAD,BCN' -> ['MAD', 'BCN'],
+    'Holanda' -> todos os aeroportos principais do país."""
     codes: list[str] = []
-    for part in text.replace(",", " ").replace("/", " ").split():
-        if part.lower() in CITY_AIRPORTS:
-            codes += CITY_AIRPORTS[part.lower()]
-        elif len(part) == 3 and part.isalpha():
-            codes.append(part.upper())
-        else:
-            raise ValueError(f"Não conheço '{part}'. Usa o código do aeroporto (ex. MAD, BCN, LHR).")
+    for chunk in text.split(","):
+        key = " ".join(chunk.lower().split())
+        if key in COUNTRY_AIRPORTS:
+            codes += COUNTRY_AIRPORTS[key]
+            continue
+        for part in chunk.replace("/", " ").split():
+            if part.lower() in COUNTRY_AIRPORTS:
+                codes += COUNTRY_AIRPORTS[part.lower()]
+            elif part.lower() in CITY_AIRPORTS:
+                codes += CITY_AIRPORTS[part.lower()]
+            elif len(part) == 3 and part.isalpha():
+                codes.append(part.upper())
+            else:
+                raise ValueError(f"Não conheço '{part}'. Usa uma cidade, um país ou o código do "
+                                 "aeroporto (ex. Madrid, Holanda, MAD).")
     if not codes:
         raise ValueError("Falta o destino.")
     return list(dict.fromkeys(codes))
+
+
+def is_country(destino: str | None) -> bool:
+    return bool(destino) and " ".join(destino.lower().split()) in COUNTRY_AIRPORTS
 
 
 def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None, hora: int | None,
@@ -334,7 +379,7 @@ def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None
     if destino:
         codes = resolve_airports(destino)
         new["airports"] = {c: {"name": c, "ground_cost": 0} for c in codes}
-        new["roundtrip_airports"] = codes
+        new["roundtrip_airports"] = codes[:3]
     if chegar_ate is not None:
         # nos bilhetes de ida e volta o Google só diz a hora da ida: não dá para filtrar a volta
         new["roundtrip_airports"] = []
@@ -901,8 +946,9 @@ def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheap
 
         raise ValueError(f"Ação desconhecida: {acao}")
     except ValueError as e:
+        # erro de quem pediu (datas, destino...): responde, mas o workflow não falha
         send_discord(f"❌ {e}", dry_run)
-        return 1
+        return 0
 
 
 def load_dotenv(path: Path = ROOT / ".env") -> None:
@@ -963,7 +1009,13 @@ def request_title(cfg: dict, destino: str | None, with_top: bool = True) -> str:
     def span(a: str, b: str) -> str:
         return fmt_day(a) if a == b else f"{fmt_day(a)} a {fmt_day(b)}"
 
-    where = f"{cfg['origin']} ⇄ {', '.join(cfg['airports'])}" if destino else "Koningsdag"
+    codes = ", ".join(cfg["airports"])
+    if not destino:
+        where = "Koningsdag"
+    elif is_country(destino):
+        where = f"{cfg['origin']} ⇄ {destino.strip().title()} ({codes})"
+    else:
+        where = f"{cfg['origin']} ⇄ {codes}"
     if d.get("pairs"):
         when = "fins de semana " + ", ".join(fmt_day(o) for o, _ in d["pairs"]) + " (sex → dom)"
     else:

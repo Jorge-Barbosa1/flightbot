@@ -13,7 +13,7 @@ import requests
 STRING, INTEGER = 3, 4
 
 DESTINO = {"type": STRING, "name": "destino", "required": True,
-           "description": "Cidade ou código do aeroporto, ex. Madrid, Londres, MAD"}
+           "description": "Cidade, país ou código do aeroporto, ex. Madrid, Holanda, MAD"}
 TRIP_OPTIONS = [
     {"type": STRING, "name": "ida",
      "description": "Dia da ida, ex. 23/10 ou 'tarde 23/10' (sair a partir das 17h)"},
