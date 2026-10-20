@@ -368,9 +368,9 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
         results = get_flights(q, integration=_consent_fetcher())
     except FlightsNotFound:
         return []
-    except TypeError:
+    except (TypeError, IndexError):
         # o parser rebenta assim quando a página vem sem voos (ex.: a Ryanair
-        # não voa nesse dia). Um bloqueio do Google dá outro erro e é contado.
+        # não voa nesse dia, ou não há rota). Um bloqueio do Google dá outro erro e é contado.
         return []
 
     priced = [f for f in results if getattr(f, "price", 0) and f.price > 0]
