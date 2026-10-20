@@ -464,6 +464,38 @@ def _consent_fetcher():
     return ConsentFetcher()
 
 
+def parse_flights(html: str):
+    """Como o `fast_flights.parser.parse`, mas lê as duas listas do Google.
+
+    A página traz os "melhores voos" (payload[2]) e os "outros voos"
+    (payload[3]); o fast-flights 3.1 só lê a segunda e perdia, por exemplo, o
+    direto da Transavia OPO-AMS que o Google mostra no topo. Juntamos as duas
+    antes de usar o parser da biblioteca.
+    """
+    from fast_flights.parser import parse_js
+    from selectolax.lexbor import LexborHTMLParser
+
+    script = LexborHTMLParser(html).css_first(r"script.ds\:1")
+    if script is None:
+        raise RuntimeError("a página não tem resultados (bloqueio ou página de consentimento?)")
+    js = script.text()
+    head, rest = js.split("data:", 1)
+    data, tail = rest.rsplit(",", 1)
+    try:
+        payload = json.loads(data)
+        best = (payload[2] or [None])[0] or []
+        other = (payload[3] or [None])[0] or []
+    except (ValueError, IndexError, TypeError):
+        return parse_js(js)       # formato inesperado: deixa o parser original decidir
+    if not best:
+        return parse_js(js)
+    if payload[3]:
+        payload[3][0] = best + other
+    else:
+        payload[3] = [best + other]
+    return parse_js(f"{head}data:{json.dumps(payload)},{tail}")
+
+
 def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> list[Leg]:
     """Pesquisa no Google Flights (via fast-flights) e devolve os voos mais
     baratos (`search.options_per_search`, por defeito só 1): só ida, ou ida e
@@ -472,7 +504,7 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
     Para trocar de fornecedor (ex.: SerpApi), basta substituir esta função por
     outra que devolva um Leg ou None. O resto do código não muda.
     """
-    from fast_flights import FlightQuery, FlightsNotFound, Passengers, create_query, get_flights
+    from fast_flights import FlightQuery, FlightsNotFound, Passengers, create_query
 
     s = cfg["search"]
     flights = [FlightQuery(date=day, from_airport=frm, to_airport=to, max_stops=s.get("max_stops"))]
@@ -489,7 +521,7 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
         checked_bags=s.get("checked_bags", 0),
     )
     try:
-        results = get_flights(q, integration=_consent_fetcher())
+        results = parse_flights(_consent_fetcher().fetch_html(q))
     except FlightsNotFound:
         return []
     except (TypeError, IndexError):

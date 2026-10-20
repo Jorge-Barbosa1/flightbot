@@ -414,3 +414,35 @@ def test_user_error_does_not_fail_workflow(cfg, tmp_path, discord):
     rc = fw.handle_pedido(cfg, {"acao": "flight", "destino": "Atlântida", "ida": "1/11", "volta": "3/11"},
                           today=TODAY, **watch_paths(tmp_path))
     assert rc == 0 and discord[-1].startswith("❌")
+
+
+def _fake_google_page(best, other):
+    """Página mínima com o mesmo formato de dados do Google Flights."""
+    import json as _json
+
+    def entry(price, airline):
+        seg = [None] * 22
+        seg[3], seg[4], seg[5], seg[6] = "OPO", "Porto", "Amesterdão", "AMS"
+        seg[8], seg[10], seg[11], seg[17] = [15], [18, 35], 155, "A320"
+        seg[20], seg[21] = [2027, 4, 23], [2027, 4, 23]
+        extras = [None] * 9
+        flight = [None] * 23
+        flight[0], flight[1], flight[2], flight[22] = "JUST", [airline], [seg], extras
+        return [flight, [[None, price]]]
+
+    payload = [None] * 8
+    payload[2] = [[entry(p, a) for p, a in best]] if best else None
+    payload[3] = [[entry(p, a) for p, a in other]]
+    payload[7] = [None, [[], []]]
+    js = "AF_initDataCallback({key: 'ds:1', data:" + _json.dumps(payload) + ", sideChannel: {}});"
+    return f'<html><script class="ds:1">{js}</script></html>'
+
+
+def test_parse_flights_reads_best_list_too():
+    page = _fake_google_page(best=[(77, "Transavia")], other=[(97, "Air Europa"), (128, "Vueling")])
+    found = sorted((f.price, f.airlines[0]) for f in fw.parse_flights(page))
+    assert found == [(77, "Transavia"), (97, "Air Europa"), (128, "Vueling")]
+    page = _fake_google_page(best=None, other=[(97, "Air Europa")])
+    assert [f.price for f in fw.parse_flights(page)] == [97]
+    with pytest.raises(RuntimeError):
+        fw.parse_flights("<html>Antes de continuar</html>")
