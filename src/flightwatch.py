@@ -557,7 +557,7 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
         print("Todas as pesquisas falharam (o Google pode estar a bloquear este IP).")
         return 1
 
-    if not dry_run:
+    if not dry_run and not request:  # o histórico é só da vigilância do Koningsdag
         append_history(legs, now, history_path)
 
     trips = build_trips(legs, cfg, per_pair=cfg["alerts"]["summary_top_n"] if request else 1)
