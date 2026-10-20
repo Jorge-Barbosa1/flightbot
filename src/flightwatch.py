@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Koningsdag flight watch.
 
-Vigia preços de voos Porto -> Países Baixos à volta do Koningsdag (27 abril 2027)
-e avisa no Discord (webhook) quando aparece algo abaixo do limite definido.
+Vigia preços de voos Porto -> Países Baixos (e aeroportos vizinhos com comboio
+para Amesterdão) à volta do Koningsdag (27 abril 2027) e avisa no Discord
+(webhook) quando aparece uma viagem abaixo do limite definido.
+
+Pesquisa a ida e a volta em separado (só ida), o que permite misturar
+companhias e aeroportos: ex. ir pela Ryanair para Weeze e voltar de Amesterdão.
 
 Uso:
     python src/flightwatch.py                # corre as pesquisas e envia alertas
@@ -29,45 +33,62 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
 STATE_PATH = ROOT / "data" / "state.json"
-HISTORY_PATH = ROOT / "data" / "history.csv"
+HISTORY_PATH = ROOT / "data" / "legs.csv"
 
-HISTORY_FIELDS = [
-    "checked_at", "origin", "destination", "depart", "return",
-    "price_per_person", "airlines", "stops_out", "currency",
-]
+HISTORY_FIELDS = ["checked_at", "from", "to", "date", "price", "airlines", "stops", "currency"]
+
+MONTHS_PT = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 
 
 # ---------------------------------------------------------------- modelos
 @dataclass(frozen=True)
-class Offer:
-    origin: str
-    destination: str
-    depart: str          # YYYY-MM-DD
-    ret: str             # YYYY-MM-DD
-    price: float         # por pessoa, ida e volta
+class Leg:
+    """Um voo só de ida (o mais barato encontrado para essa rota e dia)."""
+    frm: str
+    to: str
+    day: str             # YYYY-MM-DD
+    price: float         # por pessoa
     airlines: str
-    stops_out: int
+    stops: int
     currency: str
 
     @property
     def key(self) -> str:
-        return f"{self.origin}-{self.destination}|{self.depart}|{self.ret}"
+        return f"{self.frm}-{self.to}|{self.day}"
 
     def google_flights_url(self) -> str:
         """Link para abrires a pesquisa equivalente no Google Flights."""
         from fast_flights import FlightQuery, Passengers, create_query
 
         q = create_query(
-            flights=[
-                FlightQuery(date=self.depart, from_airport=self.origin, to_airport=self.destination),
-                FlightQuery(date=self.ret, from_airport=self.destination, to_airport=self.origin),
-            ],
-            trip="round-trip",
+            flights=[FlightQuery(date=self.day, from_airport=self.frm, to_airport=self.to)],
+            trip="one-way",
             passengers=Passengers(adults=1),
             currency=self.currency,
             language="pt-PT",
         )
         return q.url()
+
+
+@dataclass(frozen=True)
+class Trip:
+    """Ida + volta, com o custo estimado de comboio/autocarro até Amesterdão."""
+    out: Leg
+    ret: Leg
+    ground_out: float    # do aeroporto de chegada até Amesterdão
+    ground_ret: float    # de Amesterdão até ao aeroporto de partida
+
+    @property
+    def key(self) -> str:
+        return f"{self.out.day}>{self.ret.day}"
+
+    @property
+    def total(self) -> float:
+        return self.out.price + self.ret.price + self.ground_out + self.ground_ret
+
+    @property
+    def nights(self) -> int:
+        return (date.fromisoformat(self.ret.day) - date.fromisoformat(self.out.day)).days
 
 
 # ---------------------------------------------------------------- config
@@ -81,18 +102,56 @@ def daterange(start: str, end: str) -> list[str]:
     return [(d0 + timedelta(days=i)).isoformat() for i in range((d1 - d0).days + 1)]
 
 
-def build_combinations(cfg: dict) -> list[tuple[str, str, str, str]]:
-    """(origem, destino, ida, volta) respeitando o nº mínimo/máximo de noites."""
-    out_dates = daterange(*cfg["dates"]["outbound"])
-    ret_dates = daterange(*cfg["dates"]["return"])
+def date_pairs(cfg: dict) -> list[tuple[str, str]]:
+    """(ida, volta) respeitando o nº mínimo/máximo de noites."""
     lo, hi = cfg["dates"]["min_nights"], cfg["dates"]["max_nights"]
-    combos = []
-    for dest, o, r in itertools.product(cfg["destinations"], out_dates, ret_dates):
-        nights = (date.fromisoformat(r) - date.fromisoformat(o)).days
-        if lo <= nights <= hi:
-            combos.append((cfg["origin"], dest, o, r))
+    return [
+        (o, r)
+        for o, r in itertools.product(daterange(*cfg["dates"]["outbound"]),
+                                      daterange(*cfg["dates"]["return"]))
+        if lo <= (date.fromisoformat(r) - date.fromisoformat(o)).days <= hi
+    ]
+
+
+def build_searches(cfg: dict) -> list[tuple[str, str, str]]:
+    """(de, para, dia): idas Porto -> cada aeroporto e voltas cada aeroporto -> Porto."""
+    pairs = date_pairs(cfg)
+    out_days = sorted({o for o, _ in pairs})
+    ret_days = sorted({r for _, r in pairs})
+    origin, airports = cfg["origin"], list(cfg["airports"])
+    searches = [(origin, a, d) for d in out_days for a in airports]
+    searches += [(a, origin, d) for d in ret_days for a in airports]
     limit = cfg.get("max_queries_per_run")
-    return combos[:limit] if limit else combos
+    return searches[:limit] if limit else searches
+
+
+def ground_cost(cfg: dict, airport: str) -> float:
+    return float(cfg["airports"][airport].get("ground_cost", 0))
+
+
+def build_trips(legs: list[Leg], cfg: dict) -> list[Trip]:
+    """A viagem mais barata (voos + comboio) para cada par de datas válido.
+
+    A ida e a volta são escolhidas de forma independente, por isso podem ser
+    de aeroportos e companhias diferentes.
+    """
+    origin = cfg["origin"]
+    best_out: dict[str, tuple[float, Leg]] = {}
+    best_ret: dict[str, tuple[float, Leg]] = {}
+    for leg in legs:
+        if leg.frm == origin:
+            cost, table = leg.price + ground_cost(cfg, leg.to), best_out
+        else:
+            cost, table = leg.price + ground_cost(cfg, leg.frm), best_ret
+        if leg.day not in table or cost < table[leg.day][0]:
+            table[leg.day] = (cost, leg)
+
+    trips = []
+    for o, r in date_pairs(cfg):
+        if o in best_out and r in best_ret:
+            out, ret = best_out[o][1], best_ret[r][1]
+            trips.append(Trip(out, ret, ground_cost(cfg, out.to), ground_cost(cfg, ret.frm)))
+    return sorted(trips, key=lambda t: t.total)
 
 
 # ---------------------------------------------------------------- fornecedor
@@ -116,21 +175,19 @@ def _consent_fetcher():
     return ConsentFetcher()
 
 
-def fetch_cheapest(origin: str, dest: str, depart: str, ret: str, cfg: dict) -> Offer | None:
-    """Pesquisa no Google Flights (via fast-flights) e devolve a oferta mais barata.
+def fetch_cheapest(frm: str, to: str, day: str, cfg: dict) -> Leg | None:
+    """Pesquisa no Google Flights (via fast-flights) e devolve o voo só de ida
+    mais barato.
 
     Para trocar de fornecedor (ex.: SerpApi), basta substituir esta função por
-    outra que devolva um Offer ou None. O resto do código não muda.
+    outra que devolva um Leg ou None. O resto do código não muda.
     """
     from fast_flights import FlightQuery, FlightsNotFound, Passengers, create_query, get_flights
 
     s = cfg["search"]
     q = create_query(
-        flights=[
-            FlightQuery(date=depart, from_airport=origin, to_airport=dest, max_stops=s.get("max_stops")),
-            FlightQuery(date=ret, from_airport=dest, to_airport=origin, max_stops=s.get("max_stops")),
-        ],
-        trip="round-trip",
+        flights=[FlightQuery(date=day, from_airport=frm, to_airport=to, max_stops=s.get("max_stops"))],
+        trip="one-way",
         seat="economy",
         passengers=Passengers(adults=1),  # preço por pessoa; multiplicamos depois
         currency=s["currency"],
@@ -142,16 +199,20 @@ def fetch_cheapest(origin: str, dest: str, depart: str, ret: str, cfg: dict) -> 
         results = get_flights(q, integration=_consent_fetcher())
     except FlightsNotFound:
         return None
+    except TypeError:
+        # o parser rebenta assim quando a página vem sem voos (ex.: a Ryanair
+        # não voa nesse dia). Um bloqueio do Google dá outro erro e é contado.
+        return None
 
     priced = [f for f in results if getattr(f, "price", 0) and f.price > 0]
     if not priced:
         return None
     best = min(priced, key=lambda f: f.price)
-    return Offer(
-        origin=origin, destination=dest, depart=depart, ret=ret,
+    return Leg(
+        frm=frm, to=to, day=day,
         price=float(best.price),
         airlines=", ".join(best.airlines),
-        stops_out=max(len(best.flights) - 1, 0),
+        stops=max(len(best.flights) - 1, 0),
         currency=s["currency"],
     )
 
@@ -160,9 +221,11 @@ def fetch_cheapest(origin: str, dest: str, depart: str, ret: str, cfg: dict) -> 
 def load_state(path: Path = STATE_PATH) -> dict:
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            state = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            pass
+            return {}
+        # descarta chaves do formato antigo (ida+volta por rota)
+        return {k: v for k, v in state.items() if ">" in k}
     return {}
 
 
@@ -171,40 +234,54 @@ def save_state(state: dict, path: Path = STATE_PATH) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
 
 
-def append_history(offers: list[Offer], when: str, path: Path = HISTORY_PATH) -> None:
+def append_history(legs: list[Leg], when: str, path: Path = HISTORY_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     new_file = not path.exists()
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
             w.writerow(HISTORY_FIELDS)
-        for o in offers:
-            w.writerow([when, o.origin, o.destination, o.depart, o.ret,
-                        o.price, o.airlines, o.stops_out, o.currency])
+        for leg in legs:
+            w.writerow([when, leg.frm, leg.to, leg.day, leg.price, leg.airlines, leg.stops, leg.currency])
 
 
 # ---------------------------------------------------------------- alertas
-def should_alert(offer: Offer, state: dict, cfg: dict) -> bool:
-    """Alerta se estiver abaixo do limite E for novo ou tiver baixado o
-    suficiente face ao último preço alertado (evita spam)."""
+def should_alert(trip: Trip, state: dict, cfg: dict) -> bool:
+    """Alerta se o total estiver abaixo do limite E for novo ou tiver baixado o
+    suficiente face ao último total alertado (evita spam)."""
     a = cfg["alerts"]
-    if offer.price > a["max_price_per_person"]:
+    if trip.total > a["max_price_per_person"]:
         return False
-    last = state.get(offer.key, {}).get("last_alerted")
+    last = state.get(trip.key, {}).get("last_alerted")
     if last is None:
         return True
-    return offer.price <= last - a["min_drop_to_realert"]
+    return trip.total <= last - a["min_drop_to_realert"]
 
 
-def format_alert(offer: Offer, cfg: dict) -> str:
+def fmt_day(d: str) -> str:
+    x = date.fromisoformat(d)
+    return f"{x.day} {MONTHS_PT[x.month - 1]}"
+
+
+def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
+    names = cfg["airports"]
+    other = leg.to if leg.frm == cfg["origin"] else leg.frm
+    stops = "direto" if leg.stops == 0 else f"{leg.stops} escala(s)"
+    line = (f"**{label}** {fmt_day(leg.day)}: {leg.frm} → {leg.to} ({names[other].get('name', other)}) · "
+            f"{leg.price:.0f} {leg.currency} · {leg.airlines} · {stops}")
+    if ground:
+        line += f"\n  + comboio/autocarro {names[other].get('ground_time', '')} ≈ {ground:.0f} {leg.currency}"
+    return line + f"\n  <{leg.google_flights_url()}>"
+
+
+def format_alert(trip: Trip, cfg: dict) -> str:
     n = cfg["search"]["passengers"]
-    total = offer.price * n
-    stops = "direto" if offer.stops_out == 0 else f"{offer.stops_out} escala(s)"
+    cur = trip.out.currency
     return (
-        f"✈️ **{offer.origin} → {offer.destination}** | {offer.depart} → {offer.ret}\n"
-        f"**{offer.price:.0f} {offer.currency}/pessoa** (≈ {total:.0f} {offer.currency} para {n}) "
-        f"· {offer.airlines} · {stops} na ida\n"
-        f"<{offer.google_flights_url()}>"
+        f"✈️ **{fmt_day(trip.out.day)} → {fmt_day(trip.ret.day)}** · {trip.nights} noites · "
+        f"**{trip.total:.0f} {cur}/pessoa** (≈ {trip.total * n:.0f} {cur} para {n})\n"
+        f"{format_leg('Ida', trip.out, trip.ground_out, cfg)}\n"
+        f"{format_leg('Volta', trip.ret, trip.ground_ret, cfg)}"
     )
 
 
@@ -225,49 +302,56 @@ def send_discord(text: str, dry_run: bool = False) -> None:
 def run(cfg: dict, dry_run: bool = False, summary: bool = False,
         fetch=fetch_cheapest, state_path: Path = STATE_PATH,
         history_path: Path = HISTORY_PATH, sleep=time.sleep) -> int:
-    combos = build_combinations(cfg)
-    print(f"{len(combos)} pesquisas a fazer")
+    searches = build_searches(cfg)
+    print(f"{len(searches)} pesquisas a fazer")
     state = load_state(state_path)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    offers: list[Offer] = []
+    legs: list[Leg] = []
     failures = 0
-    for origin, dest, o, r in combos:
+    for frm, to, day in searches:
         try:
-            offer = fetch(origin, dest, o, r, cfg)
+            leg = fetch(frm, to, day, cfg)
         except Exception as e:  # noqa: BLE001 - não queremos parar tudo por uma pesquisa
             failures += 1
-            print(f"  ! {origin}-{dest} {o}->{r}: {type(e).__name__}: {str(e)[:120]}")
+            print(f"  ! {frm}-{to} {day}: {type(e).__name__}: {str(e)[:120]}")
             sleep(cfg["search"]["delay_seconds"])
             continue
-        if offer:
-            offers.append(offer)
-            print(f"  {offer.key}: {offer.price:.0f} {offer.currency} ({offer.airlines})")
+        if leg:
+            legs.append(leg)
+            print(f"  {leg.key}: {leg.price:.0f} {leg.currency} ({leg.airlines})")
         sleep(cfg["search"]["delay_seconds"])
 
-    if combos and failures == len(combos):
+    if searches and failures == len(searches):
         print("Todas as pesquisas falharam (o Google pode estar a bloquear este IP).")
         return 1
 
     if not dry_run:
-        append_history(offers, now, history_path)
+        append_history(legs, now, history_path)
+
+    trips = build_trips(legs, cfg)
+    for t in trips:
+        print(f"  viagem {t.key}: {t.total:.0f} ({t.out.to} / {t.ret.frm})")
 
     if summary:
-        top = sorted(offers, key=lambda x: x.price)[: cfg["alerts"]["summary_top_n"]]
+        top = trips[: cfg["alerts"]["summary_top_n"]]
         if top:
-            body = "📊 **Resumo diário – mais baratos agora**\n\n" + "\n\n".join(
-                format_alert(t, cfg) for t in top)
+            body = "📊 **Resumo diário – viagens mais baratas agora** (voos + comboio, por pessoa)\n\n"
+            body += "\n\n".join(format_alert(t, cfg) for t in top)
             send_discord(body, dry_run)
     else:
-        for offer in sorted(offers, key=lambda x: x.price):
-            if should_alert(offer, state, cfg):
-                send_discord(format_alert(offer, cfg), dry_run)
-                state.setdefault(offer.key, {})["last_alerted"] = offer.price
+        # várias datas costumam partilhar o mesmo voo barato: junta tudo numa mensagem
+        hits = [t for t in trips if should_alert(t, state, cfg)]
+        if hits:
+            send_discord("🚨 **Preço abaixo do limite!**\n\n"
+                         + "\n\n".join(format_alert(t, cfg) for t in hits), dry_run)
+        for trip in hits:
+            state.setdefault(trip.key, {})["last_alerted"] = trip.total
 
-    for offer in offers:
-        s = state.setdefault(offer.key, {})
-        s["last_seen"] = offer.price
-        s["best_seen"] = min(offer.price, s.get("best_seen", offer.price))
+    for trip in trips:
+        s = state.setdefault(trip.key, {})
+        s["last_seen"] = trip.total
+        s["best_seen"] = min(trip.total, s.get("best_seen", trip.total))
         s["updated"] = now
 
     if not dry_run:

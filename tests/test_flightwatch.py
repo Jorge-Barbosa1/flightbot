@@ -12,65 +12,105 @@ import flightwatch as fw  # noqa: E402
 def cfg():
     return {
         "origin": "OPO",
-        "destinations": ["AMS", "EIN"],
+        "airports": {"AMS": {"name": "Amesterdão", "ground_cost": 0},
+                     "NRN": {"name": "Weeze", "ground_cost": 30, "ground_time": "~2h30"}},
         "dates": {"outbound": ["2027-04-25", "2027-04-26"], "return": ["2027-04-28", "2027-04-29"],
                   "min_nights": 2, "max_nights": 4},
         "search": {"passengers": 2, "currency": "EUR", "max_stops": 1,
                    "carry_on_bags": 0, "checked_bags": 0, "delay_seconds": 0},
-        "alerts": {"max_price_per_person": 90, "min_drop_to_realert": 5, "summary_top_n": 2},
-        "max_queries_per_run": 40,
+        "alerts": {"max_price_per_person": 180, "min_drop_to_realert": 5, "summary_top_n": 2},
+        "max_queries_per_run": 60,
     }
 
 
-def offer(price, dest="AMS", o="2027-04-26", r="2027-04-28"):
-    return fw.Offer("OPO", dest, o, r, price, "Ryanair", 0, "EUR")
+@pytest.fixture(autouse=True)
+def no_urls(monkeypatch):
+    monkeypatch.setattr(fw.Leg, "google_flights_url", lambda self: "http://example/x")
+
+
+def leg(frm, to, day, price, airline="Ryanair"):
+    return fw.Leg(frm, to, day, price, airline, 0, "EUR")
+
+
+def fake_fetch(prices):
+    """prices: {(de, para): preço}; o mesmo preço para todos os dias."""
+    def fetch(frm, to, day, cfg):
+        p = prices.get((frm, to))
+        return leg(frm, to, day, p) if p is not None else None
+    return fetch
 
 
 def test_daterange_inclusive():
     assert fw.daterange("2027-04-26", "2027-04-28") == ["2027-04-26", "2027-04-27", "2027-04-28"]
 
 
-def test_combinations_respect_nights(cfg):
-    combos = fw.build_combinations(cfg)
-    # 2 destinos x (25->28:3, 25->29:4, 26->28:2, 26->29:3) = 8, todas dentro de 2..4 noites
-    assert len(combos) == 8
+def test_date_pairs_respect_nights(cfg):
+    # 25->28:3, 25->29:4, 26->28:2, 26->29:3
+    assert len(fw.date_pairs(cfg)) == 4
     cfg["dates"]["min_nights"] = 3
-    # 25->28, 25->29, 26->29 por destino
-    assert len(fw.build_combinations(cfg)) == 6
+    assert fw.date_pairs(cfg) == [("2027-04-25", "2027-04-28"), ("2027-04-25", "2027-04-29"),
+                                  ("2027-04-26", "2027-04-29")]
 
 
-def test_combinations_limit(cfg):
+def test_searches_are_one_way_both_directions(cfg):
+    s = fw.build_searches(cfg)
+    # 2 dias de ida x 2 aeroportos + 2 dias de volta x 2 aeroportos
+    assert len(s) == 8
+    assert ("OPO", "NRN", "2027-04-25") in s and ("AMS", "OPO", "2027-04-29") in s
     cfg["max_queries_per_run"] = 3
-    assert len(fw.build_combinations(cfg)) == 3
+    assert len(fw.build_searches(cfg)) == 3
+
+
+def test_trips_mix_airports_and_add_ground_cost(cfg):
+    legs = [
+        leg("OPO", "AMS", "2027-04-25", 100),
+        leg("OPO", "NRN", "2027-04-25", 60),      # 60 + 30 comboio = 90 < 100
+        leg("AMS", "OPO", "2027-04-28", 70),      # 70 < 50 + 30
+        leg("NRN", "OPO", "2027-04-28", 50),
+    ]
+    trips = fw.build_trips(legs, cfg)
+    assert len(trips) == 1                        # só 25->28 tem ida e volta
+    t = trips[0]
+    assert (t.out.to, t.ret.frm) == ("NRN", "AMS")
+    assert t.total == 60 + 30 + 70
+    assert t.nights == 3
 
 
 def test_should_alert_rules(cfg):
-    assert not fw.should_alert(offer(95), {}, cfg)            # acima do limite
-    assert fw.should_alert(offer(80), {}, cfg)                # novo e barato
-    st = {offer(80).key: {"last_alerted": 80}}
-    assert not fw.should_alert(offer(78), st, cfg)            # baixou menos de 5
-    assert fw.should_alert(offer(75), st, cfg)                # baixou >= 5
+    def trip(total):
+        return fw.Trip(leg("OPO", "AMS", "2027-04-25", total - 50),
+                       leg("AMS", "OPO", "2027-04-28", 50), 0, 0)
+
+    assert not fw.should_alert(trip(190), {}, cfg)            # acima do limite
+    assert fw.should_alert(trip(170), {}, cfg)                # novo e barato
+    st = {trip(170).key: {"last_alerted": 170}}
+    assert not fw.should_alert(trip(168), st, cfg)            # baixou menos de 5
+    assert fw.should_alert(trip(165), st, cfg)                # baixou >= 5
 
 
-def test_run_alerts_and_state(cfg, tmp_path, monkeypatch):
+def test_format_alert_shows_both_legs_and_train(cfg):
+    t = fw.Trip(leg("OPO", "NRN", "2027-04-25", 60), leg("AMS", "OPO", "2027-04-28", 70, "Vueling"), 30, 0)
+    msg = fw.format_alert(t, cfg)
+    assert "25 abr → 28 abr" in msg and "3 noites" in msg
+    assert "160 EUR/pessoa" in msg and "320 EUR para 2" in msg
+    assert "Weeze" in msg and "comboio/autocarro ~2h30 ≈ 30 EUR" in msg
+    assert msg.count("comboio") == 1                          # volta é de AMS, sem comboio
+
+
+def test_run_alerts_once_and_state(cfg, tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
-    monkeypatch.setattr(fw.Offer, "google_flights_url", lambda self: "http://example/x")
-    prices = {"AMS": 70, "EIN": 120}
-
-    def fake_fetch(origin, dest, o, r, cfg):
-        return offer(prices[dest], dest, o, r)
-
+    fetch = fake_fetch({("OPO", "NRN"): 60, ("OPO", "AMS"): 120,
+                        ("AMS", "OPO"): 70, ("NRN", "OPO"): 200})
     state, hist = tmp_path / "state.json", tmp_path / "h.csv"
-    rc = fw.run(cfg, fetch=fake_fetch, state_path=state, history_path=hist, sleep=lambda s: None)
+    rc = fw.run(cfg, fetch=fetch, state_path=state, history_path=hist, sleep=lambda s: None)
     assert rc == 0
-    assert sent and all("AMS" in m for m in sent)             # só AMS está abaixo de 90
-    n_first = len(sent)
-    assert hist.read_text().count("\n") == 1 + 8              # cabeçalho + 8 linhas
+    assert len(sent) == 1 and sent[0].count("✈️") == 4        # 4 pares de datas, 160 cada
+    assert hist.read_text(encoding="utf-8").count("\n") == 1 + 8
 
     # segunda corrida com os mesmos preços: sem novos alertas (anti-spam)
-    fw.run(cfg, fetch=fake_fetch, state_path=state, history_path=hist, sleep=lambda s: None)
-    assert len(sent) == n_first
+    fw.run(cfg, fetch=fetch, state_path=state, history_path=hist, sleep=lambda s: None)
+    assert len(sent) == 1
 
 
 def test_run_all_failures_returns_1(cfg, tmp_path):
@@ -85,12 +125,19 @@ def test_run_all_failures_returns_1(cfg, tmp_path):
 def test_summary_sends_top_n(cfg, tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
-    monkeypatch.setattr(fw.Offer, "google_flights_url", lambda self: "http://example/x")
-    fw.run(cfg, summary=True, fetch=lambda o, d, a, b, c: offer(100 if d == "EIN" else 60, d, a, b),
-           state_path=tmp_path / "s.json", history_path=tmp_path / "h.csv", sleep=lambda s: None)
+    fetch = fake_fetch({("OPO", "AMS"): 200, ("AMS", "OPO"): 200})
+    fw.run(cfg, summary=True, fetch=fetch, state_path=tmp_path / "s.json",
+           history_path=tmp_path / "h.csv", sleep=lambda s: None)
     assert len(sent) == 1 and sent[0].count("✈️") == 2
+
+
+def test_old_state_keys_are_dropped(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text('{"OPO-AMS|2027-04-24|2027-04-28": {"last_seen": 1}, '
+                 '"2027-04-24>2027-04-28": {"last_seen": 2}}', encoding="utf-8")
+    assert list(fw.load_state(p)) == ["2027-04-24>2027-04-28"]
 
 
 def test_real_config_loads_and_builds():
     cfg = fw.load_config()
-    assert fw.build_combinations(cfg)
+    assert fw.build_searches(cfg)

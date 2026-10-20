@@ -3,9 +3,21 @@
 
 origin: OPO
 
-# Aeroportos de destino. AMS = Amesterdão, EIN = Eindhoven, RTM = Roterdão.
-# Confirma que companhias voam mesmo estas rotas a partir do Porto (ainda não verificado).
-destinations: [AMS, EIN]   # RTM retirado: o Google não devolve voos OPO-RTM com <= 1 escala
+# Aeroportos onde se pode chegar/partir. A ida e a volta são pesquisadas em separado
+# (só ida), por isso podem ser de aeroportos e companhias diferentes.
+# ground_cost = estimativa por pessoa, só ida, do aeroporto até Amesterdão (comboio/autocarro).
+# São ESTIMATIVAS de bilhete comprado com antecedência: confirma em ns.nl / bahn.de /
+# belgiantrain.be / flibco.com antes de comprar e ajusta aqui.
+airports:
+  AMS: {name: Amesterdão, ground_cost: 0}
+  EIN: {name: Eindhoven, ground_cost: 20, ground_time: "~1h30"}
+  NRN: {name: "Weeze, Alemanha", ground_cost: 30, ground_time: "~2h30 (autocarro + comboio via Nijmegen)"}
+  DUS: {name: "Düsseldorf, Alemanha", ground_cost: 40, ground_time: "~2h30"}
+  CGN: {name: "Colónia, Alemanha", ground_cost: 45, ground_time: "~3h"}
+  BRU: {name: "Bruxelas, Bélgica", ground_cost: 40, ground_time: "~2h45"}
+  CRL: {name: "Charleroi, Bélgica", ground_cost: 55, ground_time: "~3h30 (autocarro + comboio via Bruxelas)"}
+  # Paris (BVA/CDG) e Roterdão (RTM) testados e deixados de fora: Paris fica a 3h20+ de
+  # comboio caro, e o Google não devolve voos OPO-RTM.
 
 dates:
   # Janelas de datas (inclusive). O script testa todas as combinações ida/volta
@@ -24,9 +36,10 @@ search:
   delay_seconds: 3       # pausa entre pesquisas (não abuses do Google)
 
 alerts:
-  max_price_per_person: 180    # ida e volta, por pessoa. AJUSTA depois de veres a baseline
-  min_drop_to_realert: 5       # só volta a alertar a mesma combinação se baixar >= 5 EUR
+  # Total por pessoa: voo de ida + voo de volta + comboio/autocarro até Amesterdão (ida e volta).
+  max_price_per_person: 180
+  min_drop_to_realert: 5       # só volta a alertar as mesmas datas se baixar >= 5 EUR
   summary_top_n: 5
 
 # Segurança para não fazer pesquisas a mais por execução.
-max_queries_per_run: 40
+max_queries_per_run: 60

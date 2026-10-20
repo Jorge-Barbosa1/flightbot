@@ -4,9 +4,20 @@ Bot que vigia preços de voos **Porto → Países Baixos** à volta do **Konings
 (terça, 27 de abril)** e avisa no **Discord** quando aparece algo barato.
 Não usa IA nem chaves pagas: é um script Python que corre em cron e fala com um webhook do Discord.
 
-> Estado: **código escrito e a lógica testada com dados simulados, mas ainda nunca corrido contra o
-> Google Flights a sério** (onde foi criado não havia acesso). O primeiro passo em casa é fazer um
-> `--dry-run` e ver se devolve preços. Ver `docs/CONTEXT.md` para o que falta confirmar.
+## Como pesquisa
+
+- **Fonte:** Google Flights (via `fast-flights`, scraping, sem chave). O Google Flights inclui
+  Ryanair, Vueling, TAP, KLM, Air Europa, Eurowings, etc. O link de compra é sempre o do Google.
+- **Só ida, nos dois sentidos:** cada execução pesquisa Porto → cada aeroporto em cada dia de ida
+  e cada aeroporto → Porto em cada dia de volta. Assim a viagem pode misturar companhias e
+  aeroportos (ex.: ida pela Ryanair para Weeze, volta de Amesterdão pela Vueling).
+- **Aeroportos vizinhos + comboio:** além de AMS e EIN, procura em Weeze, Düsseldorf, Colónia,
+  Bruxelas e Charleroi, e soma uma estimativa do comboio/autocarro até Amesterdão (`ground_cost`
+  em `config.yaml`).
+- **Alerta:** para cada par de datas fica a combinação mais barata. Se o total por pessoa
+  (2 voos + comboios) ficar abaixo de `max_price_per_person`, manda tudo numa mensagem.
+
+> Estado: a correr no GitHub Actions desde 19 out 2026.
 
 ## Pôr a funcionar em casa
 
@@ -35,10 +46,8 @@ Se o passo 4 mostrar preços, está tudo bem. Se der erro/sem resultados, vai a 
 
 1. No repo: *Settings → Secrets and variables → Actions → New repository secret* →
    `DISCORD_WEBHOOK_URL`.
-2. **Passo manual:** o ficheiro `github-workflow-check.yml` (na raiz) tem de ser movido para
-   `.github/workflows/check.yml` (criar as pastas). O Claude não tem permissão para escrever nessa pasta.
-   O workflow corre 3x por dia + um resumo diário, e faz commit de
-   `data/state.json` e `data/history.csv` (o histórico de preços fica no próprio repo).
+2. O workflow (`.github/workflows/check.yml`) corre 3x por dia + um resumo diário, e faz commit de
+   `data/state.json` e `data/legs.csv` (o histórico de preços fica no próprio repo).
 3. Para testar já: *Actions → flight-watch → Run workflow*.
 
 **Aviso:** o Google pode bloquear os IPs do GitHub (são de datacenter). Se as corridas falharem sempre,
@@ -47,9 +56,10 @@ ou muda o fornecedor (ver abaixo).
 
 ## Configuração
 
-Tudo em `config.yaml`: aeroportos de destino, janelas de datas, nº de noites, escalas, bagagem,
-limite de preço por pessoa e anti-spam dos alertas. **Ajusta `max_price_per_person` depois de
-uma semana ou duas de histórico**: abre `data/history.csv` e vê o que é "normal" para cada rota.
+Tudo em `config.yaml`: aeroportos e custo do comboio até Amesterdão, janelas de datas, nº de
+noites, escalas, bagagem, limite de preço por pessoa e anti-spam dos alertas. Para acrescentar um
+aeroporto basta uma linha em `airports` (cada aeroporto a mais custa 2 pesquisas por dia de viagem).
+O histórico de cada voo fica em `data/legs.csv`.
 
 ## Estrutura
 
@@ -57,10 +67,11 @@ uma semana ou duas de histórico**: abre `data/history.csv` e vê o que é "norm
 src/flightwatch.py      script principal (pesquisa, alertas, Discord, estado)
 config.yaml             parâmetros da viagem e dos alertas
 tests/                  testes da lógica (pytest), sem rede
-data/state.json         último preço visto/alertado por combinação (gerado)
-data/history.csv        histórico de todos os preços (gerado)
+data/state.json         último total visto/alertado por par de datas (gerado)
+data/legs.csv           histórico de preços de cada voo só de ida (gerado)
+data/history.csv        histórico antigo, de quando só pesquisava ida+volta (já não é escrito)
 docs/CONTEXT.md         contexto, decisões, dúvidas por confirmar, ideias, checklist da viagem
-github-workflow-check.yml  agendamento do GitHub Actions (mover para .github/workflows/check.yml)
+.github/workflows/check.yml  agendamento do GitHub Actions
 ```
 
 ## Problemas prováveis
