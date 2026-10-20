@@ -1,8 +1,10 @@
 """Regista (ou atualiza) o comando /flight na app do Discord.
 
 Uso (uma vez, e de novo sempre que mudares as opções do comando):
-    DISCORD_APP_ID=... DISCORD_BOT_TOKEN=... python discord-worker/register_commands.py
+    python discord-worker/register_commands.py <APP_ID>      # pede o token do bot
+    (ou com as variáveis DISCORD_APP_ID e DISCORD_BOT_TOKEN)
 """
+import getpass
 import os
 import sys
 
@@ -35,9 +37,17 @@ COMMANDS = [
 
 
 def main() -> int:
-    app_id, token = os.environ.get("DISCORD_APP_ID"), os.environ.get("DISCORD_BOT_TOKEN")
+    app_id = os.environ.get("DISCORD_APP_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
+    token = os.environ.get("DISCORD_BOT_TOKEN") or getpass.getpass("Token do bot (não aparece): ").strip()
     if not app_id or not token:
-        print("Define DISCORD_APP_ID e DISCORD_BOT_TOKEN.")
+        print("Uso: python discord-worker/register_commands.py <APP_ID>  (pede o token do bot)")
+        return 1
+    if token.startswith(("github_pat_", "ghp_")):
+        print("Isso é o token do GitHub. Precisas do token do bot do Discord (Bot -> Reset Token).")
+        return 1
+    if token.count(".") != 2:
+        print(f"Isso não parece um token de bot do Discord ({len(token)} caracteres; um token de bot "
+              "tem ~70 e duas partes separadas por pontos). Confirma que colaste tudo.")
         return 1
     r = requests.put(f"https://discord.com/api/v10/applications/{app_id}/commands",
                      headers={"Authorization": f"Bot {token}"}, json=COMMANDS, timeout=15)
