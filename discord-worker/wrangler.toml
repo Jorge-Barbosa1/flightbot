@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2025-09-01"
 
 [vars]
-GITHUB_REPO = "Jorge-Barbosa1/koningsdag-flight-watch"
+GITHUB_REPO = "Jorge-Barbosa1/flightbot"
 GITHUB_REF = "master"
 
 # Segredos (não ficam aqui; definem-se com `npx wrangler secret put NOME`):

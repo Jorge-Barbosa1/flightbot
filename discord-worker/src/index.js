@@ -5,7 +5,7 @@
 // Variáveis (wrangler.toml / `wrangler secret put`):
 //   DISCORD_PUBLIC_KEY  chave pública da app do Discord (General Information)
 //   GITHUB_TOKEN        token fine-grained com "Actions: read and write" no repo
-//   GITHUB_REPO         ex. Jorge-Barbosa1/koningsdag-flight-watch
+//   GITHUB_REPO         ex. Jorge-Barbosa1/flightbot
 //   GITHUB_REF          branch, ex. master
 //   ALLOWED_USERS       (opcional) IDs do Discord autorizados, separados por vírgulas
 
