@@ -1,1 +1,37 @@
-[]
+[
+  {
+    "id": 1,
+    "user": "558698764106465300",
+    "label": "OPO ⇄ Holanda (AMS, EIN, RTM), 23 abr → 1 mai, ida a partir das 17h",
+    "max": 140,
+    "origin": "OPO",
+    "airports": [
+      "AMS",
+      "EIN",
+      "RTM"
+    ],
+    "roundtrip": [
+      "AMS",
+      "EIN",
+      "RTM"
+    ],
+    "dates": {
+      "outbound": [
+        "2027-04-23",
+        "2027-04-23"
+      ],
+      "return": [
+        "2027-05-01",
+        "2027-05-01"
+      ],
+      "min_nights": 0,
+      "max_nights": 60,
+      "earliest_departure": {
+        "2027-04-23": 17
+      },
+      "latest_arrival": {}
+    },
+    "carry_on_bags": 0,
+    "created": "2026-10-20T13:12:58+00:00"
+  }
+]
