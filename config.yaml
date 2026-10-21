@@ -24,13 +24,13 @@ roundtrip_airports: [AMS]
 dates:
   # Janelas de datas (inclusive). O script testa todas as combinações ida/volta
   # que respeitem o nº de noites abaixo.
-  outbound: [2027-04-23, 2027-04-26]   # 23 = sexta, só depois do trabalho (ver abaixo)
+  outbound: [2027-04-23, 2027-04-26]   # 23 = sexta, só a partir das 19h, depois do trabalho (ver abaixo)
   return:   [2027-04-28, 2027-05-01]   # 1 mai = sábado
   min_nights: 2
   max_nights: 8
   # Hora mínima de partida da ida, por dia (os outros dias: qualquer hora).
   earliest_departure:
-    "2027-04-23": 17
+    "2027-04-23": 19
 
 search:
   passengers: 2          # só serve para mostrar o total estimado nas mensagens

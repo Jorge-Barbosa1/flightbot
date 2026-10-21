@@ -40,6 +40,12 @@ def fake_fetch(prices):
     return fetch
 
 
+def test_fmt_day_has_weekday():
+    assert fw.fmt_day("2027-04-23") == "sex 23 abr"
+    assert fw.fmt_day("2027-05-01") == "sáb 1 mai"
+    assert fw.fmt_day("2027-05-01", weekday=False) == "1 mai"
+
+
 def test_daterange_inclusive():
     assert fw.daterange("2027-04-26", "2027-04-28") == ["2027-04-26", "2027-04-27", "2027-04-28"]
 
@@ -113,7 +119,7 @@ def test_should_alert_rules(cfg):
 def test_format_alert_shows_both_legs_and_train(cfg):
     t = fw.Trip(leg("OPO", "NRN", "2027-04-25", 60), leg("AMS", "OPO", "2027-04-28", 70, "Vueling"), 30, 0)
     msg = fw.format_alert(t, cfg)
-    assert "25 abr → 28 abr" in msg and "3 noites" in msg
+    assert "dom 25 abr → qua 28 abr" in msg and "3 noites" in msg
     assert "160 EUR/pessoa" in msg and "320 EUR para 2" in msg
     assert "Weeze" in msg and "comboio/autocarro ≈ 30 EUR · ~2h30" in msg
     assert msg.count("comboio") == 1                          # volta é de AMS, sem comboio

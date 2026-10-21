@@ -609,9 +609,14 @@ def should_alert(trip: Trip, state: dict, cfg: dict) -> bool:
     return trip.total <= last - a["min_drop_to_realert"]
 
 
-def fmt_day(d: str) -> str:
+WEEKDAYS_PT = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+
+
+def fmt_day(d: str, weekday: bool = True) -> str:
+    """'2027-04-23' -> 'sex 23 abr' (ou '23 abr' sem o dia da semana)."""
     x = date.fromisoformat(d)
-    return f"{x.day} {MONTHS_PT[x.month - 1]}"
+    day = f"{x.day} {MONTHS_PT[x.month - 1]}"
+    return f"{WEEKDAYS_PT[x.weekday()]} {day}" if weekday else day
 
 
 def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
@@ -1049,7 +1054,7 @@ def request_title(cfg: dict, destino: str | None, with_top: bool = True) -> str:
     else:
         where = f"{cfg['origin']} ⇄ {codes}"
     if d.get("pairs"):
-        when = "fins de semana " + ", ".join(fmt_day(o) for o, _ in d["pairs"]) + " (sex → dom)"
+        when = "fins de semana " + ", ".join(fmt_day(o, weekday=False) for o, _ in d["pairs"]) + " (sex → dom)"
     else:
         when = f"{span(*d['outbound'])} → {span(*d['return'])}"
     title = f"{where}, {when}"
