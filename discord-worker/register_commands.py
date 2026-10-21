@@ -92,7 +92,10 @@ def main() -> int:
         return 1
     r = requests.put(f"https://discord.com/api/v10/applications/{app_id}/commands",
                      headers={"Authorization": f"Bot {token}"}, json=COMMANDS, timeout=15)
-    print(r.status_code, r.text[:500])
+    if r.ok:
+        print(r.status_code, "registados:", ", ".join(f"/{c['name']}" for c in r.json()))
+    else:
+        print(r.status_code, r.text[:500])
     return 0 if r.ok else 1
 
 
