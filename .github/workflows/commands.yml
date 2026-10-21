@@ -1,0 +1,24 @@
+name: discord-commands
+
+# Regista os comandos do Discord sempre que a lista muda (ou à mão em Actions).
+# Precisa do secret DISCORD_BOT_TOKEN (portal do Discord -> Bot -> Reset Token).
+on:
+  push:
+    branches: [master]
+    paths: [discord-worker/register_commands.py]
+  workflow_dispatch:
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python discord-worker/register_commands.py
+        env:
+          DISCORD_APP_ID: "1562052174848983131"
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}

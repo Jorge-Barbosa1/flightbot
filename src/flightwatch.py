@@ -25,6 +25,9 @@ Pedido à medida (manda os N melhores para essas datas, sem mexer nos alertas):
 
 Vigilâncias (criadas no Discord com /vigiar) ficam em data/watches.json e são
 verificadas em cada corrida agendada, a seguir ao Koningsdag.
+
+Outros comandos do Discord: /explorar (para onde é mais barato?) e /historico
+(gráfico da evolução do preço).
 """
 from __future__ import annotations
 
@@ -36,9 +39,11 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 import yaml
@@ -102,6 +107,8 @@ class Trip:
     ret: Leg | None
     ground_out: float    # do aeroporto de chegada até Amesterdão
     ground_ret: float    # de Amesterdão até ao aeroporto de partida
+    home_out: float = 0  # de casa (Porto) até outro aeroporto de partida (ex. Lisboa)
+    home_ret: float = 0  # desse aeroporto de volta a casa
 
     @property
     def ret_day(self) -> str:
@@ -114,7 +121,7 @@ class Trip:
     @property
     def total(self) -> float:
         flights = self.out.price + (self.ret.price if self.ret else 0)
-        return flights + self.ground_out + self.ground_ret
+        return flights + self.ground_out + self.ground_ret + self.home_out + self.home_ret
 
     @property
     def nights(self) -> int:
@@ -146,15 +153,43 @@ def date_pairs(cfg: dict) -> list[tuple[str, str]]:
     ]
 
 
+def search_origins(cfg: dict) -> dict[str, list[str] | None]:
+    """Outros aeroportos de partida -> para que destinos (None = todos).
+    Por defeito os `extra_origins` do config (vigilância do Koningsdag)."""
+    if "search_origins" in cfg:
+        return cfg["search_origins"] or {}
+    return cfg.get("extra_origins") or {}
+
+
+def origin_codes(cfg: dict) -> set[str]:
+    return {cfg["origin"], *search_origins(cfg)}
+
+
+def origin_info(cfg: dict, code: str) -> dict:
+    """Transporte de casa até esse aeroporto (custo por pessoa e sentido, horas a mais)."""
+    if code == cfg["origin"]:
+        return {"name": cfg.get("origin_name", code), "ground_cost": 0, "lead_hours": 0}
+    return {"name": code, "ground_cost": 0, "lead_hours": 0, **(cfg.get("origins") or {}).get(code, {})}
+
+
+def home_cost(cfg: dict, code: str) -> float:
+    return float(origin_info(cfg, code).get("ground_cost", 0))
+
+
 def build_searches(cfg: dict) -> list[tuple[str, str, str, str | None]]:
     """(de, para, dia, volta): idas Porto -> cada aeroporto, voltas cada
-    aeroporto -> Porto (volta = None) e ida e volta nos `roundtrip_airports`."""
+    aeroporto -> Porto (volta = None), o mesmo a partir das outras origens, e
+    ida e volta nos `roundtrip_airports`."""
     pairs = date_pairs(cfg)
     out_days = sorted({o for o, _ in pairs})
     ret_days = sorted({r for _, r in pairs})
     origin, airports = cfg["origin"], list(cfg["airports"])
     searches = [(origin, a, d, None) for d in out_days for a in airports]
     searches += [(a, origin, d, None) for d in ret_days for a in airports]
+    for extra, only in search_origins(cfg).items():
+        dests = [a for a in airports if only is None or a in only]
+        searches += [(extra, a, d, None) for d in out_days for a in dests]
+        searches += [(a, extra, d, None) for d in ret_days for a in dests]
     searches += [(origin, a, o, r) for o, r in pairs for a in cfg.get("roundtrip_airports", [])]
     limit = cfg.get("max_queries_per_run")
     return searches[:limit] if limit else searches
@@ -180,6 +215,7 @@ def parse_day(text: str, today: date | None = None) -> str:
 LATE_WORDS = {"tarde", "late", "noite", "night", "evening"}
 EARLY_WORDS = {"cedo", "early", "manha", "manhã", "morning"}
 LATE_HOUR = 17       # "tarde" na ida = sair a partir das 17h
+DAY_START = 6        # a que horas se pode sair de casa (para chegar a outro aeroporto)
 EARLY_HOUR = 15      # "cedo" na volta = chegar a casa até às 15h
 
 
@@ -374,12 +410,20 @@ def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None
     dates["latest_arrival"] = {d: chegar_ate for d in ret_days} if chegar_ate is not None else {}
 
     new = {**cfg}
+    new["search_origins"] = {}
     if origem:
-        new["origin"] = resolve_airports(origem)[0]
+        text = origem.strip().lower()
+        if text in ("todas", "todos", "all", "tudo"):
+            codes = [cfg["origin"], *(cfg.get("origins") or {})]
+        else:
+            codes = resolve_airports(re.sub(r"\s+(e|and|\+)\s+", ",", origem))
+        new["origin"] = codes[0]
+        new["search_origins"] = {c: None for c in codes[1:]}
     if destino:
         codes = resolve_airports(destino)
         new["airports"] = {c: {"name": c, "ground_cost": 0} for c in codes}
         new["roundtrip_airports"] = codes[:3]
+        new["stay_city"] = None
     if chegar_ate is not None:
         # nos bilhetes de ida e volta o Google só diz a hora da ida: não dá para filtrar a volta
         new["roundtrip_airports"] = []
@@ -387,7 +431,7 @@ def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None
     new["alerts"] = {**cfg["alerts"], "summary_top_n": top}
     new["search"] = {**cfg["search"], "options_per_search": per_pair, "carry_on_bags": parse_bags(bagagem)}
     new["max_queries_per_run"] = None
-    new["request"] = {"per_pair": per_pair, "destino": destino}
+    new["request"] = {"per_pair": per_pair, "destino": destino, "origem": origem}
     return new
 
 
@@ -418,14 +462,14 @@ def build_trips(legs: list[Leg], cfg: dict, per_pair: int = 1) -> list[Trip]:
     de aeroportos e companhias diferentes. Um bilhete de ida e volta na mesma
     companhia ganha se custar o mesmo ou menos.
     """
-    origin = cfg["origin"]
+    origins = origin_codes(cfg)
     outs: dict[str, list[Leg]] = {}
     rets: dict[str, list[Leg]] = {}
     rts: dict[tuple[str, str], list[Leg]] = {}
     for leg in legs:
         if leg.ret_day:
             rts.setdefault((leg.day, leg.ret_day), []).append(leg)
-        elif leg.frm == origin:
+        elif leg.frm in origins:
             outs.setdefault(leg.day, []).append(leg)
         else:
             rets.setdefault(leg.day, []).append(leg)
@@ -437,7 +481,8 @@ def build_trips(legs: list[Leg], cfg: dict, per_pair: int = 1) -> list[Trip]:
             g = ground_cost(cfg, rt.to)
             options.append(Trip(rt, None, g, g))
         for out, ret in itertools.product(outs.get(o, []), rets.get(r, [])):
-            options.append(Trip(out, ret, ground_cost(cfg, out.to), ground_cost(cfg, ret.frm)))
+            options.append(Trip(out, ret, ground_cost(cfg, out.to), ground_cost(cfg, ret.frm),
+                                home_cost(cfg, out.frm), home_cost(cfg, ret.to)))
         # sort estável: em caso de empate fica o de ida e volta (vem primeiro)
         trips += sorted(options, key=lambda t: t.total)[:per_pair]
     return sorted(trips, key=lambda t: t.total)
@@ -530,10 +575,21 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
         return []
 
     priced = [f for f in results if getattr(f, "price", 0) and f.price > 0]
-    if frm == cfg["origin"] and (min_hour := earliest_hour(cfg, day)):
-        priced = [f for f in priced if f.flights and f.flights[0].departure.time[0] >= min_hour]
-    if frm != cfg["origin"] and (max_hour := latest_arrival(cfg, day)) is not None:
-        priced = [f for f in priced if f.flights and arrives_by(f.flights[-1].arrival, day, max_hour)]
+    origins = origin_codes(cfg)
+    # de outro aeroporto (ex. Lisboa) é preciso lá chegar: o dia em casa começa às
+    # DAY_START e acaba às 24h, e somam-se/tiram-se as `lead_hours` dessa origem
+    if frm in origins:
+        lead = origin_info(cfg, frm).get("lead_hours", 0)
+        min_hour = max(earliest_hour(cfg, day), DAY_START) + lead if lead else earliest_hour(cfg, day)
+        if min_hour:
+            priced = [f for f in priced if f.flights and f.flights[0].departure.time[0] >= min_hour]
+    else:
+        lead = origin_info(cfg, to).get("lead_hours", 0)
+        max_hour = latest_arrival(cfg, day)
+        if lead:
+            max_hour = (24 if max_hour is None else max_hour) - lead
+        if max_hour is not None:
+            priced = [f for f in priced if f.flights and arrives_by(f.flights[-1].arrival, day, max_hour)]
     legs: list[Leg] = []
     for f in sorted(priced, key=lambda f: f.price):
         leg = Leg(
@@ -619,15 +675,16 @@ def fmt_day(d: str, weekday: bool = True) -> str:
     return f"{WEEKDAYS_PT[x.weekday()]} {day}" if weekday else day
 
 
-def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
+def format_leg(label: str, leg: Leg, ground: float, cfg: dict, home: float = 0) -> str:
     names = cfg["airports"]
-    other = leg.to if leg.frm == cfg["origin"] else leg.frm
+    outbound = leg.frm in origin_codes(cfg)
+    other = leg.to if outbound else leg.frm
     name = names.get(other, {}).get("name", other)
     where = f" ({name})" if name != other else ""
     stops = "direto" if leg.stops == 0 else f"{leg.stops} escala(s)"
     if leg.depart:
         stops += f" · sai {leg.depart}"
-    if leg.arrive and leg.frm != cfg["origin"]:
+    if leg.arrive and not outbound:
         stops += f", chega {leg.arrive}"
     if leg.ret_day:
         line = (f"**{label}** {fmt_day(leg.day)} → {fmt_day(leg.ret_day)}: {leg.frm} ⇄ {leg.to}{where} · "
@@ -638,6 +695,11 @@ def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
                 f"{leg.price:.0f} {leg.currency} · {leg.airlines} · {stops}")
     # link mascarado; os <> evitam a pré-visualização gigante do Discord
     line += f" · [ver no Google Flights](<{leg.google_flights_url()}>)"
+    if home:
+        airport = leg.frm if outbound else leg.to
+        info, home_name = origin_info(cfg, airport), cfg.get("origin_name", cfg["origin"])
+        route = f"{home_name} → {info['name']}" if outbound else f"{info['name']} → {home_name}"
+        line += f"\n  + {route} ≈ {home:.0f} {leg.currency} · {info.get('ground_time', '')}"
     if ground:
         each_way = " (cada sentido)" if leg.ret_day else ""
         line += (f"\n  + comboio/autocarro{each_way} ≈ {ground:.0f} {leg.currency} · "
@@ -645,16 +707,54 @@ def format_leg(label: str, leg: Leg, ground: float, cfg: dict) -> str:
     return line
 
 
+# aeroporto -> cidade para procurar alojamento (nomes que o Booking/Airbnb percebem)
+AIRPORT_CITY = {
+    "MAD": "Madrid", "BCN": "Barcelona", "SVQ": "Sevilla", "VLC": "Valencia", "AGP": "Malaga",
+    "PMI": "Palma de Mallorca", "IBZ": "Ibiza", "ALC": "Alicante", "BIO": "Bilbao", "TFS": "Tenerife",
+    "TFN": "Tenerife", "LIS": "Lisboa", "OPO": "Porto", "FAO": "Faro", "FNC": "Funchal",
+    "PDL": "Ponta Delgada", "LHR": "London", "LGW": "London", "STN": "London", "LTN": "London",
+    "MAN": "Manchester", "EDI": "Edinburgh", "GLA": "Glasgow", "BRS": "Bristol", "LPL": "Liverpool",
+    "CDG": "Paris", "ORY": "Paris", "BVA": "Paris", "LYS": "Lyon", "NCE": "Nice", "MRS": "Marseille",
+    "TLS": "Toulouse", "BOD": "Bordeaux", "NTE": "Nantes", "FCO": "Rome", "CIA": "Rome",
+    "MXP": "Milan", "LIN": "Milan", "BGY": "Milan", "VCE": "Venice", "TSF": "Venice", "NAP": "Naples",
+    "BLQ": "Bologna", "PSA": "Pisa", "AMS": "Amsterdam", "EIN": "Eindhoven", "RTM": "Rotterdam",
+    "BRU": "Brussels", "CRL": "Brussels", "BER": "Berlin", "MUC": "Munich", "FRA": "Frankfurt",
+    "HHN": "Frankfurt", "DUS": "Dusseldorf", "NRN": "Dusseldorf", "CGN": "Cologne", "HAM": "Hamburg",
+    "STR": "Stuttgart", "DUB": "Dublin", "ZRH": "Zurich", "GVA": "Geneva", "BSL": "Basel",
+    "VIE": "Vienna", "SZG": "Salzburg", "PRG": "Prague", "BUD": "Budapest", "KRK": "Krakow",
+    "WAW": "Warsaw", "WMI": "Warsaw", "GDN": "Gdansk", "WRO": "Wroclaw", "CPH": "Copenhagen",
+    "BLL": "Billund", "ARN": "Stockholm", "GOT": "Gothenburg", "OSL": "Oslo", "HEL": "Helsinki",
+    "ATH": "Athens", "SKG": "Thessaloniki", "IST": "Istanbul", "SAW": "Istanbul", "ZAG": "Zagreb",
+    "SPU": "Split", "DBV": "Dubrovnik", "RAK": "Marrakech", "CMN": "Casablanca", "FEZ": "Fes",
+    "TNG": "Tangier", "LUX": "Luxembourg", "MLA": "Malta",
+}
+
+
+def stay_links(trip: Trip, cfg: dict) -> str:
+    """'🏨 Alojamento em Amsterdam: Booking · Airbnb' com as datas da viagem."""
+    city = cfg.get("stay_city") or AIRPORT_CITY.get(trip.out.to)
+    if not city:
+        return ""
+    n, q = cfg["search"]["passengers"], quote(city)
+    ci, co = trip.out.day, trip.ret_day
+    booking = (f"https://www.booking.com/searchresults.pt-pt.html?ss={q}&checkin={ci}&checkout={co}"
+               f"&group_adults={n}&no_rooms=1")
+    airbnb = f"https://www.airbnb.pt/s/{q}/homes?checkin={ci}&checkout={co}&adults={n}"
+    return f"🏨 Alojamento em {city}: [Booking](<{booking}>) · [Airbnb](<{airbnb}>)"
+
+
 def format_alert(trip: Trip, cfg: dict) -> str:
     n = cfg["search"]["passengers"]
     cur = trip.out.currency
-    return (
+    text = (
         f"✈️ **{fmt_day(trip.out.day)} → {fmt_day(trip.ret_day)}** · {trip.nights} noites · "
         f"**{trip.total:.0f} {cur}/pessoa** (≈ {trip.total * n:.0f} {cur} para {n})\n"
         + (format_leg("Ida e volta", trip.out, trip.ground_out, cfg) if trip.ret is None else
-           f"{format_leg('Ida', trip.out, trip.ground_out, cfg)}\n"
-           f"{format_leg('Volta', trip.ret, trip.ground_ret, cfg)}")
+           f"{format_leg('Ida', trip.out, trip.ground_out, cfg, trip.home_out)}\n"
+           f"{format_leg('Volta', trip.ret, trip.ground_ret, cfg, trip.home_ret)}")
     )
+    stay = stay_links(trip, cfg)
+    return f"{text}\n{stay}" if stay else text
 
 
 def split_message(text: str, limit: int = 1900) -> list[str]:
@@ -679,18 +779,65 @@ def split_message(text: str, limit: int = 1900) -> list[str]:
     return chunks
 
 
-def send_discord(text: str, dry_run: bool = False) -> None:
-    if dry_run:
-        print("[dry-run] Discord:\n" + text + "\n")
-        return
-    # DISCORD_REPLY_URL: resposta a um comando /flight (vai para quem perguntou)
+def discord_url() -> str:
+    # DISCORD_REPLY_URL: resposta a um comando (vai para quem perguntou)
     url = os.environ.get("DISCORD_REPLY_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
     if not url:
         raise RuntimeError("Falta a variável de ambiente DISCORD_WEBHOOK_URL")
-    for chunk in split_message(text):
-        r = requests.post(url, json={"content": chunk}, timeout=15)
+    return url
+
+
+def send_discord(text: str, dry_run: bool = False, components: list | None = None) -> None:
+    """Envia texto (partido em mensagens de até 2000 caracteres). Os botões
+    (`components`) vão na última mensagem e só funcionam nas respostas a comandos."""
+    if dry_run:
+        print("[dry-run] Discord:\n" + text + "\n")
+        for row in components or []:
+            print("[dry-run] botões:", [b["label"] for b in row["components"]])
+        return
+    url = discord_url()
+    chunks = split_message(text)
+    for i, chunk in enumerate(chunks):
+        body = {"content": chunk}
+        if components and i == len(chunks) - 1:
+            body["components"] = components
+        r = requests.post(url, json=body, timeout=15)
+        if r.status_code == 400 and "components" in body:   # webhook normal não aceita botões
+            r = requests.post(url, json={"content": chunk}, timeout=15)
         r.raise_for_status()
         time.sleep(0.5)
+
+
+def send_discord_file(text: str, data: bytes, filename: str, dry_run: bool = False) -> None:
+    if dry_run:
+        out = ROOT / filename
+        out.write_bytes(data)
+        print(f"[dry-run] Discord:\n{text}\n[dry-run] imagem guardada em {out}")
+        return
+    r = requests.post(discord_url(), data={"payload_json": json.dumps({"content": text})},
+                      files={"files[0]": (filename, data, "image/png")}, timeout=30)
+    r.raise_for_status()
+
+
+def watch_button(label: str, trip: Trip, cfg: dict, destino: str | None = None) -> dict | None:
+    """Botão "👀 Vigiar" que abre a janela do preço máximo (tratada no worker).
+    O custom_id leva tudo o que é preciso para criar a vigilância (máx. 100)."""
+    req = cfg.get("request", {})
+    hour = earliest_hour(cfg, trip.out.day) or ""
+    arrive = latest_arrival(cfg, trip.ret_day)
+    origem = (req.get("origem") or "").replace("|", " ")
+    for dest in (destino or req.get("destino") or "", ",".join(cfg["airports"])):
+        dest = dest.replace("|", " ").strip()
+        cid = (f"v|{dest}|{trip.out.day}|{trip.ret_day}|{hour}|{'' if arrive is None else arrive}"
+               f"|{cfg['search'].get('carry_on_bags', 0)}|{origem}")
+        if dest and len(cid) <= 99:
+            return {"type": 2, "style": 2, "label": label[:80], "custom_id": cid}
+    return None
+
+
+def button_rows(buttons: list) -> list:
+    buttons = [b for b in buttons if b][:25]
+    return [{"type": 1, "components": buttons[i:i + 5]} for i in range(0, len(buttons), 5)]
 
 
 # ---------------------------------------------------------------- execução
@@ -722,7 +869,11 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
             else " (por pessoa)"
         body = f"🔎 **Pedido: {request}**{extra}\n\n"
         body += "\n\n".join(format_alert(t, cfg) for t in top) if top else "Não encontrei voos para essas datas."
-        send_discord(body, dry_run)
+        if top:
+            body += "\n\n👀 Carrega num botão para vigiar essas datas e seres avisado quando baixar."
+        rows = button_rows([watch_button(f"👀 {i}. {fmt_day(t.out.day)} → {fmt_day(t.ret_day)}", t, cfg)
+                            for i, t in enumerate(top[:5], 1)])
+        send_discord(body, dry_run, rows)
         return 0
 
     if summary:
@@ -758,25 +909,122 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
 
 
 def search_all(cfg: dict, fetch=fetch_cheapest, sleep=time.sleep) -> tuple[list[Leg], bool]:
-    """Corre todas as pesquisas do cfg. Devolve (voos, todas_falharam)."""
+    """Corre todas as pesquisas do cfg. Devolve (voos, todas_falharam).
+    Com `search.workers` > 1 faz várias ao mesmo tempo (o /explorar usa isto)."""
     searches = build_searches(cfg)
-    print(f"{len(searches)} pesquisas a fazer")
-    legs: list[Leg] = []
-    failures = 0
-    for frm, to, day, ret in searches:
+    workers = max(1, int(cfg["search"].get("workers", 1)))
+    print(f"{len(searches)} pesquisas a fazer" + (f" ({workers} em paralelo)" if workers > 1 else ""))
+
+    def one(search):
+        """Lista de voos, ou None se a pesquisa falhou (sem voos = lista vazia)."""
+        frm, to, day, ret = search
         try:
             found = fetch(frm, to, day, ret, cfg)
+            found = found if isinstance(found, list) else [found] if found else []
         except Exception as e:  # noqa: BLE001 - não queremos parar tudo por uma pesquisa
-            failures += 1
             print(f"  ! {frm}-{to} {day}{'->' + ret if ret else ''}: {type(e).__name__}: {str(e)[:120]}")
-            sleep(cfg["search"]["delay_seconds"])
-            continue
-        found = found if isinstance(found, list) else [found] if found else []
-        for leg in found:
+            found = None
+        sleep(cfg["search"]["delay_seconds"])
+        return found
+
+    if workers > 1:
+        with ThreadPoolExecutor(workers) as pool:
+            results = list(pool.map(one, searches))
+    else:
+        results = [one(s) for s in searches]
+    legs: list[Leg] = []
+    for found in results:
+        for leg in found or []:
             legs.append(leg)
             print(f"  {leg.key}: {leg.price:.0f} {leg.currency} ({leg.airlines})")
-        sleep(cfg["search"]["delay_seconds"])
+    failures = sum(1 for r in results if r is None)
     return legs, bool(searches) and failures == len(searches)
+
+
+# ---------------------------------------------------------------- histórico (gráfico)
+def koningsdag_series(cfg: dict, path: Path = HISTORY_PATH) -> list[tuple[datetime, float]]:
+    """Melhor total (voos + comboio) de cada corrida, a partir de data/legs.csv."""
+    if not path.exists():
+        return []
+    runs: dict[str, list[Leg]] = {}
+    with open(path, encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                runs.setdefault(row["checked_at"], []).append(Leg(
+                    row["from"], row["to"], row["date"], float(row["price"]), row["airlines"],
+                    int(row["stops"]), row["currency"], row.get("return") or None))
+            except (KeyError, ValueError):
+                continue
+    series = []
+    for when, legs in sorted(runs.items()):
+        trips = build_trips(legs, cfg)
+        if trips:
+            series.append((datetime.fromisoformat(when), trips[0].total))
+    return series
+
+
+def price_chart(points: list[tuple[datetime, float]], title: str, limit: float | None = None) -> bytes:
+    """PNG com a evolução do melhor preço. Fundo escuro como o do Discord, uma
+    linha de 2px, pontos no mínimo e no valor atual, e o limite como referência."""
+    import io
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    surface, ink, ink2, grid, series = "#1a1a19", "#f0efec", "#c3c2b7", "#2f2f2d", "#3987e5"
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    fig, ax = plt.subplots(figsize=(10, 4.6), dpi=110)
+    fig.patch.set_facecolor(surface)
+    ax.set_facecolor(surface)
+    ax.plot(xs, ys, color=series, lw=2, solid_joinstyle="round", solid_capstyle="round", zorder=2)
+
+    i_min = min(range(len(ys)), key=lambda i: (ys[i], -i))
+    marks = {len(ys) - 1: f"agora {ys[-1]:.0f} €"}
+    if i_min != len(ys) - 1:
+        marks[i_min] = f"mínimo {ys[i_min]:.0f} €"
+    else:
+        marks[i_min] = f"agora {ys[-1]:.0f} € (o mínimo)"
+    for i, text in marks.items():
+        ax.scatter([xs[i]], [ys[i]], s=70, color=series, edgecolors=surface, linewidths=2, zorder=3)
+        ax.annotate(text, (xs[i], ys[i]), xytext=(0, 10), textcoords="offset points",
+                    ha="right" if i == len(ys) - 1 else "center", color=ink, fontsize=10)
+
+    low, high = min(ys), max(ys)
+    if limit is not None:
+        ax.axhline(limit, color=ink2, lw=1, alpha=0.7, zorder=1)
+        ax.annotate(f"limite {limit:.0f} €", (xs[0], limit), xytext=(4, 4), textcoords="offset points",
+                    color=ink2, fontsize=9)
+        low, high = min(low, limit), max(high, limit)
+    pad = max(8, (high - low) * 0.15)
+    ax.set_ylim(low - pad, high + pad * 1.6)
+
+    ax.set_title(title, loc="left", color=ink, fontsize=13, pad=12)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0f} €"))
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+    ax.xaxis.set_major_locator(locator)
+    # com poucos dias de dados as marcas caem no mesmo dia: mostra também a hora
+    short = (xs[-1] - xs[0]).days < 4
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %Hh" if short else "%d/%m"))
+    ax.tick_params(colors=ink2, labelsize=9, length=0)
+    ax.grid(axis="y", color=grid, lw=1)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(grid)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=surface)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def series_summary(points: list[tuple[datetime, float]]) -> str:
+    ys = [y for _, y in points]
+    i_min = min(range(len(ys)), key=lambda i: ys[i])
+    first = points[0][0].date().isoformat()
+    return (f"Agora **{ys[-1]:.0f} €** · mínimo {ys[i_min]:.0f} € ({fmt_day(points[i_min][0].date().isoformat())}) · "
+            f"máximo {max(ys):.0f} € · {len(ys)} medições desde {fmt_day(first)}")
 
 
 # ---------------------------------------------------------------- compra já
@@ -828,8 +1076,11 @@ def watch_cfg(cfg: dict, w: dict) -> dict:
     return {
         **cfg,
         "origin": w["origin"],
-        "airports": {a: {"name": a, "ground_cost": 0} for a in w["airports"]},
+        "airports": (w["airports"] if isinstance(w["airports"], dict)
+                     else {a: {"name": a, "ground_cost": 0} for a in w["airports"]}),
         "roundtrip_airports": w["roundtrip"],
+        "search_origins": w.get("search_origins", {}),
+        "stay_city": None,
         "dates": w["dates"],
         "search": {**cfg["search"], "carry_on_bags": w.get("carry_on_bags", 0), "options_per_search": 1},
         "alerts": {**cfg["alerts"], "max_price_per_person": w["max"]},
@@ -894,9 +1145,10 @@ def run_watches(cfg: dict, dry_run: bool = False, summary: bool = False, fetch=f
 
 def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheapest,
                   sleep=time.sleep, state_path: Path = STATE_PATH,
-                  watches_path: Path = WATCHES_PATH, today: date | None = None) -> int:
-    """Pedidos vindos do Discord: /flight, /vigiar, /vigilancias e /parar.
-    A resposta vai para quem perguntou (DISCORD_REPLY_URL)."""
+                  watches_path: Path = WATCHES_PATH, today: date | None = None,
+                  history_path: Path = HISTORY_PATH) -> int:
+    """Pedidos vindos do Discord: /flight, /vigiar, /vigilancias, /parar,
+    /explorar e /historico. A resposta vai para quem perguntou (DISCORD_REPLY_URL)."""
     acao = req.get("acao") or "flight"
     user = req.get("user")
 
@@ -934,6 +1186,30 @@ def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheap
             send_discord(f"🛑 Vigilância #{wid} parada ({w['label']}).", dry_run)
             return 0
 
+        if acao == "historico":
+            wid = num("id")
+            if wid:
+                w = next((x for x in load_watches(watches_path) if x["id"] == wid), None)
+                if w is None:
+                    raise ValueError(f"Não há nenhuma vigilância #{wid}. Vê a lista com `/vigilancias`.")
+                raw = load_state(state_path).get(f"watch:{wid}", {}).get("trend", {}).get("series", [])
+                points = [(datetime.fromisoformat(a), float(b)) for a, b in raw]
+                title, limit = f"Vigilância #{wid}: melhor preço por pessoa", w["max"]
+                head = f"📉 **Histórico da vigilância #{wid}** ({w['label']})"
+            else:
+                points = koningsdag_series(cfg, history_path)
+                title = "Koningsdag: melhor preço por pessoa (voos + comboio)"
+                limit = cfg["alerts"]["max_price_per_person"]
+                head = "📉 **Histórico do Koningsdag**"
+            if len(points) < 2:
+                raise ValueError("Ainda não há medições suficientes para um gráfico (são feitas 3x por dia).")
+            send_discord_file(f"{head}\n{series_summary(points)}", price_chart(points, title, limit),
+                              "historico.png", dry_run)
+            return 0
+
+        if acao == "explorar":
+            return explore(cfg, req, num, dry_run, fetch, sleep, today)
+
         rc = apply_request(cfg, req.get("ida"), req.get("volta"), num("top"), num("sair_depois"),
                            destino=req.get("destino"), chegar_ate=num("chegar_ate"),
                            origem=req.get("origem"), today=today, quando=req.get("quando"),
@@ -958,6 +1234,7 @@ def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheap
                 "origin": rc["origin"],
                 "airports": list(rc["airports"]),
                 "roundtrip": rc["roundtrip_airports"],
+                "search_origins": rc["search_origins"],
                 "dates": rc["dates"],
                 "carry_on_bags": rc["search"]["carry_on_bags"],
                 "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -986,6 +1263,53 @@ def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheap
         # erro de quem pediu (datas, destino...): responde, mas o workflow não falha
         send_discord(f"❌ {e}", dry_run)
         return 0
+
+
+def explore(cfg: dict, req: dict, num, dry_run: bool, fetch=fetch_cheapest,
+            sleep=time.sleep, today: date | None = None) -> int:
+    """/explorar: testa os destinos de `explore` no config para as datas pedidas
+    e devolve o ranking do mais barato para o mais caro (melhor viagem de cada cidade)."""
+    cities: dict[str, list[str]] = cfg["explore"]
+    codes = list(dict.fromkeys(c for cs in cities.values() for c in cs))
+    rc = apply_request(cfg, req.get("ida"), req.get("volta"), 1, num("sair_depois"),
+                       destino=",".join(codes), chegar_ate=num("chegar_ate"), origem=req.get("origem"),
+                       today=today, quando=req.get("quando"), bagagem=req.get("bagagem"))
+    rc["roundtrip_airports"] = []           # poupa pesquisas: só idas soltas
+    rc["search"] = {**rc["search"], "options_per_search": 1,
+                    "workers": cfg["search"].get("explore_workers", 6)}
+    legs, _ = search_all(rc, fetch, sleep)
+
+    results = []
+    for city, cs in cities.items():
+        sub = {**rc, "airports": {c: {"name": c, "ground_cost": 0} for c in cs}, "roundtrip_airports": []}
+        trips = build_trips([leg for leg in legs if leg.to in cs or leg.frm in cs], sub)
+        if trips:
+            results.append((city, cs, trips[0], sub))
+    results.sort(key=lambda r: r[2].total)
+    limit = num("max")
+    if limit:
+        results = [r for r in results if r[2].total <= limit]
+    top = results[: num("top") or 10]
+
+    when = request_title(rc, None, with_top=False).split(", ", 1)[1]
+    body = f"🌍 **Para onde é mais barato?** {when} (por pessoa, ida e volta)\n\n"
+    if not top:
+        body += "Não encontrei nada" + (f" abaixo de {limit} €." if limit else " para essas datas.")
+    lines = []
+    for i, (city, _, trip, sub) in enumerate(top, 1):
+        out, ret = trip.out, trip.ret
+        lines.append(
+            f"**{i}. {city}** · **{trip.total:.0f} €** · {fmt_day(out.day)} → {fmt_day(trip.ret_day)}\n"
+            f"   ida {out.to} {out.airlines} ({'direto' if out.stops == 0 else f'{out.stops} escala(s)'}, "
+            f"sai {out.depart}) · volta {ret.frm} {ret.airlines} · "
+            f"[ida](<{out.google_flights_url()}>) · [volta](<{ret.google_flights_url()}>)")
+    body += "\n".join(lines)
+    if top:
+        body += "\n\n👀 Carrega num botão para vigiar um destino."
+    rows = button_rows([watch_button(f"👀 {city}", trip, sub, ",".join(cs))
+                        for city, cs, trip, sub in top[:5]])
+    send_discord(body, dry_run, rows)
+    return 0
 
 
 def load_dotenv(path: Path = ROOT / ".env") -> None:
@@ -1047,6 +1371,8 @@ def request_title(cfg: dict, destino: str | None, with_top: bool = True) -> str:
         return fmt_day(a) if a == b else f"{fmt_day(a)} a {fmt_day(b)}"
 
     codes = ", ".join(cfg["airports"])
+    if search_origins(cfg) and destino:
+        cfg = {**cfg, "origin": "/".join([cfg["origin"], *search_origins(cfg)])}
     if not destino:
         where = "Koningsdag"
     elif is_country(destino):

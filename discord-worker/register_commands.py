@@ -1,4 +1,4 @@
-"""Regista (ou atualiza) os comandos /flight, /vigiar, /vigilancias e /parar.
+"""Regista (ou atualiza) os comandos do FlightBot no Discord.
 
 Uso (uma vez, e de novo sempre que mudares as opções do comando):
     python discord-worker/register_commands.py <APP_ID>      # pede o token do bot
@@ -27,7 +27,8 @@ TRIP_OPTIONS = [
      "description": "Só voltas a chegar a casa até esta hora (ex. 14)"},
     {"type": STRING, "name": "bagagem", "description": "Incluir mala de cabine no preço",
      "choices": [{"name": "com mala de cabine", "value": "cabine"}]},
-    {"type": STRING, "name": "origem", "description": "Aeroporto de partida (por defeito OPO)"},
+    {"type": STRING, "name": "origem",
+     "description": "Aeroporto(s) de partida: OPO (defeito), 'OPO,LIS' ou 'todas' (Porto, Lisboa, Vigo...)"},
 ]
 
 COMMANDS = [
@@ -47,6 +48,22 @@ COMMANDS = [
                      "description": "Preço máximo por pessoa, ida e volta (€)"}] + TRIP_OPTIONS,
     },
     {
+        "name": "explorar",
+        "description": "Para onde é mais barato? Testa ~25 destinos e mostra o ranking",
+        "options": [o for o in TRIP_OPTIONS if o["name"] != "origem"] + [
+            {"type": INTEGER, "name": "max", "min_value": 1,
+             "description": "Só destinos até este preço por pessoa (€)"},
+            {"type": INTEGER, "name": "top", "min_value": 1, "max_value": 25,
+             "description": "Quantos destinos mostrar (por defeito 10)"},
+        ],
+    },
+    {
+        "name": "historico",
+        "description": "Gráfico da evolução do preço (Koningsdag ou uma vigilância)",
+        "options": [{"type": INTEGER, "name": "id", "min_value": 1,
+                     "description": "Número da vigilância (vazio = Koningsdag)"}],
+    },
+    {
         "name": "vigilancias",
         "description": "Mostra as vigilâncias ativas",
     },
@@ -61,7 +78,8 @@ COMMANDS = [
 
 def main() -> int:
     app_id = os.environ.get("DISCORD_APP_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
-    token = os.environ.get("DISCORD_BOT_TOKEN") or getpass.getpass("Token do bot (não aparece): ").strip()
+    token = os.environ.get("DISCORD_BOT_TOKEN") or (
+        getpass.getpass("Token do bot (não aparece): ").strip() if sys.stdin.isatty() else "")
     if not app_id or not token:
         print("Uso: python discord-worker/register_commands.py <APP_ID>  (pede o token do bot)")
         return 1

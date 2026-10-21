@@ -127,7 +127,7 @@ def test_format_alert_shows_both_legs_and_train(cfg):
 
 def test_run_alerts_once_and_state(cfg, tmp_path, monkeypatch):
     sent = []
-    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, *a: sent.append(text))
     fetch = fake_fetch({("OPO", "NRN"): 60, ("OPO", "AMS"): 120,
                         ("AMS", "OPO"): 70, ("NRN", "OPO"): 200})
     state, hist = tmp_path / "state.json", tmp_path / "h.csv"
@@ -152,7 +152,7 @@ def test_run_all_failures_returns_1(cfg, tmp_path):
 
 def test_summary_sends_top_n(cfg, tmp_path, monkeypatch):
     sent = []
-    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, *a: sent.append(text))
     fetch = fake_fetch({("OPO", "AMS"): 200, ("AMS", "OPO"): 200})
     fw.run(cfg, summary=True, fetch=fetch, state_path=tmp_path / "s.json",
            history_path=tmp_path / "h.csv", sleep=lambda s: None)
@@ -249,7 +249,7 @@ def test_per_pair_gives_several_options(cfg):
 
 def test_request_sends_top_n_and_keeps_state(cfg, tmp_path, monkeypatch):
     sent = []
-    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, *a: sent.append(text))
     r = fw.apply_request(cfg, "25/04", "28/04", 2, None, today=TODAY)
     fetch = fake_fetch({("OPO", "NRN"): 60, ("OPO", "AMS"): 120, ("AMS", "OPO"): 70, ("NRN", "OPO"): 200})
     state = tmp_path / "s.json"
@@ -261,7 +261,7 @@ def test_request_sends_top_n_and_keeps_state(cfg, tmp_path, monkeypatch):
 
 def test_request_with_no_flights_says_so(cfg, tmp_path, monkeypatch):
     sent = []
-    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, *a: sent.append(text))
     fw.run(cfg, fetch=fake_fetch({}), state_path=tmp_path / "s.json", history_path=tmp_path / "h.csv",
            sleep=lambda s: None, request="vazio")
     assert "Não encontrei" in sent[0]
@@ -328,7 +328,7 @@ def test_trend_new_low():
 @pytest.fixture
 def discord(monkeypatch):
     sent = []
-    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False: sent.append(text))
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, *a: sent.append(text))
     return sent
 
 
@@ -452,3 +452,122 @@ def test_parse_flights_reads_best_list_too():
     assert [f.price for f in fw.parse_flights(page)] == [97]
     with pytest.raises(RuntimeError):
         fw.parse_flights("<html>Antes de continuar</html>")
+
+
+# ---------------------------------------------------------------- origens alternativas
+def test_extra_origins_add_searches_and_home_cost(cfg):
+    cfg["origins"] = {"LIS": {"name": "Lisboa", "ground_cost": 30, "lead_hours": 4, "ground_time": "~3h"}}
+    cfg["extra_origins"] = {"LIS": ["AMS"]}
+    s = fw.build_searches(cfg)
+    assert ("LIS", "AMS", "2027-04-25", None) in s and ("AMS", "LIS", "2027-04-28", None) in s
+    assert not any(x[0] == "LIS" and x[1] == "NRN" for x in s)          # só para os destinos pedidos
+    legs = [leg("LIS", "AMS", "2027-04-25", 40), leg("OPO", "AMS", "2027-04-25", 100),
+            leg("AMS", "OPO", "2027-04-28", 70)]
+    t = fw.build_trips(legs, cfg)[0]
+    assert t.out.frm == "LIS" and t.total == 40 + 30 + 70                # 40 + comboio Porto-Lisboa
+    msg = fw.format_alert(t, cfg)
+    assert "Porto → Lisboa ≈ 30 EUR" in msg or "OPO → Lisboa ≈ 30 EUR" in msg
+
+
+def test_request_multiple_origins(cfg):
+    cfg["origins"] = {"LIS": {"name": "Lisboa", "ground_cost": 30, "lead_hours": 4}}
+    r = fw.apply_request(cfg, "23/10", "25/10", None, None, destino="MAD", origem="porto e lisboa", today=TODAY)
+    assert r["origin"] == "OPO" and r["search_origins"] == {"LIS": None}
+    r = fw.apply_request(cfg, "23/10", "25/10", None, None, destino="MAD", today=TODAY)
+    assert r["search_origins"] == {}                                     # não herda as do Koningsdag
+    assert "LIS" not in fw.origin_codes(r)
+
+
+# ---------------------------------------------------------------- alojamento
+def test_stay_links(cfg):
+    t = fw.Trip(leg("OPO", "AMS", "2027-04-24", 88), leg("AMS", "OPO", "2027-05-01", 70), 0, 0)
+    links = fw.stay_links(t, cfg)
+    assert "Alojamento em Amsterdam" in links
+    assert "checkin=2027-04-24&checkout=2027-05-01" in links and "group_adults=2" in links
+    cfg["stay_city"] = "Utrecht"
+    assert "Alojamento em Utrecht" in fw.stay_links(t, cfg)
+    t2 = fw.Trip(leg("OPO", "XXX", "2027-04-24", 88), leg("XXX", "OPO", "2027-05-01", 70), 0, 0)
+    cfg["stay_city"] = None
+    assert fw.stay_links(t2, cfg) == ""
+
+
+# ---------------------------------------------------------------- botões
+def test_watch_button(cfg):
+    r = fw.apply_request(cfg, "tarde 23/10", "cedo 25/10", None, None, destino="Madrid", today=TODAY)
+    t = fw.Trip(leg("OPO", "MAD", "2026-10-23", 60), leg("MAD", "OPO", "2026-10-25", 50), 0, 0)
+    b = fw.watch_button("👀 Vigiar", t, r)
+    assert b["custom_id"] == "v|Madrid|2026-10-23|2026-10-25|17|15|0|"
+    assert len(fw.button_rows([b] * 7)) == 2
+
+
+# ---------------------------------------------------------------- /explorar
+def test_explore_ranks_cities(cfg, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, rows=None: calls.append((text, rows)))
+    cfg["explore"] = {"Roma": ["FCO", "CIA"], "Madrid": ["MAD"], "Praga": ["PRG"]}
+    prices = {("OPO", "FCO"): 60, ("CIA", "OPO"): 30, ("OPO", "MAD"): 40, ("MAD", "OPO"): 40,
+              ("OPO", "CIA"): 90, ("FCO", "OPO"): 80}
+    fw.handle_pedido(cfg, {"acao": "explorar", "quando": "este fim de semana", "top": 5},
+                     fetch=fake_fetch(prices), sleep=lambda s: None, today=TODAY, **watch_paths(tmp_path))
+    text, rows = calls[-1]
+    assert text.index("**1. Madrid** · **80 €**") < text.index("**2. Roma** · **90 €**")
+    assert "Praga" not in text                                           # sem voos
+    assert [b["label"] for b in rows[0]["components"]] == ["👀 Madrid", "👀 Roma"]
+    assert rows[0]["components"][1]["custom_id"].startswith("v|FCO,CIA|2026-10-23|2026-10-25|17|")
+
+
+def test_explore_max_filter(cfg, tmp_path, discord):
+    cfg["explore"] = {"Madrid": ["MAD"]}
+    fw.handle_pedido(cfg, {"acao": "explorar", "quando": "este fim de semana", "max": 50},
+                     fetch=fake_fetch({("OPO", "MAD"): 40, ("MAD", "OPO"): 40}),
+                     sleep=lambda s: None, today=TODAY, **watch_paths(tmp_path))
+    assert "abaixo de 50" in discord[-1]
+
+
+def test_parallel_search_same_result(cfg):
+    fetch = fake_fetch({("OPO", "AMS"): 100, ("AMS", "OPO"): 70})
+    a, _ = fw.search_all(cfg, fetch, lambda s: None)
+    cfg["search"]["workers"] = 4
+    b, _ = fw.search_all(cfg, fetch, lambda s: None)
+    assert sorted(x.key for x in a) == sorted(x.key for x in b)
+
+
+# ---------------------------------------------------------------- /historico
+def test_historico_koningsdag(cfg, tmp_path, monkeypatch):
+    hist = tmp_path / "legs.csv"
+    for when, price in [("2026-10-19T07:00:00+00:00", 100), ("2026-10-20T07:00:00+00:00", 90),
+                        ("2026-10-21T07:00:00+00:00", 95)]:
+        fw.append_history([leg("OPO", "AMS", "2027-04-25", price), leg("AMS", "OPO", "2027-04-28", 70)], when, hist)
+    pts = fw.koningsdag_series(cfg, hist)
+    assert [y for _, y in pts] == [170, 160, 165]
+    sent = []
+    monkeypatch.setattr(fw, "send_discord_file", lambda text, data, name, dry=False: sent.append((text, data)))
+    fw.handle_pedido(cfg, {"acao": "historico"}, history_path=hist, **watch_paths(tmp_path))
+    text, png = sent[0]
+    assert "Agora **165 €** · mínimo 160 €" in text and png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_historico_needs_data(cfg, tmp_path, discord):
+    fw.handle_pedido(cfg, {"acao": "historico"}, history_path=tmp_path / "nada.csv", **watch_paths(tmp_path))
+    assert discord[-1].startswith("❌")
+
+
+def test_other_origin_needs_time_to_get_there(cfg, monkeypatch):
+    cfg["origins"] = {"LIS": {"name": "Lisboa", "ground_cost": 30, "lead_hours": 4}}
+    cfg["search_origins"] = {"LIS": None}
+
+    class F:
+        def __init__(self, price, dep, arr):
+            self.price, self.airlines = price, ["Transavia"]
+            seg = type("S", (), {})()
+            seg.departure = type("D", (), {"time": (dep, 0), "date": (2027, 4, 24)})()
+            seg.arrival = type("A", (), {"time": (arr, 0), "date": (2027, 4, 24)})()
+            self.flights = [seg]
+
+    monkeypatch.setattr(fw, "_consent_fetcher", lambda: type("X", (), {"fetch_html": lambda s, q: ""})())
+    monkeypatch.setattr(fw, "parse_flights", lambda html: [F(54, 8, 11), F(80, 12, 15)])
+    early = fw.fetch_cheapest("LIS", "AMS", "2027-04-24", None, cfg)
+    assert [leg.depart for leg in early] == ["12:00"]           # 08:00 não dá: 6h + 4h = 10h
+    monkeypatch.setattr(fw, "parse_flights", lambda html: [F(54, 15, 21), F(80, 12, 19)])
+    back = fw.fetch_cheapest("AMS", "LIS", "2027-04-24", None, cfg)
+    assert [leg.arrive for leg in back] == ["19:00"]            # chegar a Lisboa às 21h já não dá

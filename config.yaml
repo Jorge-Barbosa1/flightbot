@@ -2,6 +2,25 @@
 # A véspera (Koningsnacht, 26 abril) também é grande festa -> convém lá estar nessa noite.
 
 origin: OPO
+origin_name: Porto
+
+# Outros aeroportos de onde se pode partir, com o transporte desde o Porto
+# (por pessoa, cada sentido). lead_hours = horas a mais para lá chegar: somam-se
+# à hora mínima de partida da ida e tiram-se à hora máxima de chegada da volta.
+# Nos pedidos do Discord: origem:"OPO,LIS" ou origem:todas.
+origins:
+  LIS: {name: Lisboa, ground_cost: 30, lead_hours: 4, ground_time: "~3h Alfa Pendular/IC até Lisboa Oriente + metro"}
+  VGO: {name: Vigo, ground_cost: 15, lead_hours: 3, ground_time: "~2h30 de autocarro (Alsa/FlixBus)"}
+  SCQ: {name: Santiago de Compostela, ground_cost: 25, lead_hours: 4, ground_time: "~3h30 de autocarro"}
+
+# Na vigilância do Koningsdag, de que outras origens pesquisar e para que aeroportos.
+# Testado a 21 out 2026: de Lisboa a Transavia para AMS sai bem mais barata (54 € vs 88 €);
+# Vigo e Santiago só têm voos com escala e mais caros, por isso ficam de fora.
+extra_origins:
+  LIS: [AMS, BRU, CRL]
+
+# Cidade para os links de alojamento (Booking/Airbnb) nas mensagens do Koningsdag.
+stay_city: Amsterdam
 
 # Aeroportos onde se pode chegar/partir. A ida e a volta são pesquisadas em separado
 # (só ida), por isso podem ser de aeroportos e companhias diferentes.
@@ -39,6 +58,7 @@ search:
   carry_on_bags: 0       # low-cost: bagagem de mão grande/porão muda o preço, ajusta aqui
   checked_bags: 0
   delay_seconds: 3       # pausa entre pesquisas (não abuses do Google)
+  explore_workers: 6     # /explorar: pesquisas em paralelo (são muitos destinos)
 
 alerts:
   # Total por pessoa: voo de ida + voo de volta + comboio/autocarro até Amesterdão (ida e volta).
@@ -48,3 +68,32 @@ alerts:
 
 # Segurança para não fazer pesquisas a mais por execução.
 max_queries_per_run: 100
+
+# /explorar: destinos testados (cidade -> aeroportos). Cada aeroporto custa 2 pesquisas
+# por fim de semana / par de datas, por isso a lista fica curta e com os mais servidos do Porto.
+explore:
+  Madrid: [MAD]
+  Barcelona: [BCN]
+  Sevilha: [SVQ]
+  Palma: [PMI]
+  Londres: [STN, LGW]
+  Paris: [ORY, BVA]
+  Roma: [FCO, CIA]
+  Milão: [BGY]
+  Veneza: [VCE]
+  Nápoles: [NAP]
+  Amesterdão: [AMS, EIN]
+  Bruxelas: [CRL, BRU]
+  Berlim: [BER]
+  Dublin: [DUB]
+  Edimburgo: [EDI]
+  Genebra: [GVA]
+  Basileia: [BSL]
+  Praga: [PRG]
+  Budapeste: [BUD]
+  Cracóvia: [KRK]
+  Viena: [VIE]
+  Marraquexe: [RAK]
+  Nice: [NCE]
+  Luxemburgo: [LUX]
+  Malta: [MLA]

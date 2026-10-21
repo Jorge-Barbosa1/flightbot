@@ -60,6 +60,8 @@ for (const [name, options, text] of [
     { name: "quando", value: "fins de semana de novembro" }], /vigilância para \*\*Roma\*\*.*até 120/],
   ["parar", [{ name: "id", value: 3 }], /parar a vigilância #3/],
   ["vigilancias", [], /lista de vigilâncias/],
+  ["explorar", [{ name: "quando", value: "fins de semana de novembro" }], /para onde é mais barato/],
+  ["historico", [], /histórico do Koningsdag/],
 ]) {
   calls.length = 0;
   waits.length = 0;
@@ -75,5 +77,31 @@ for (const [name, options, text] of [
 // utilizador fora da lista
 res = await worker.fetch(await signed(cmd), { ...env, ALLOWED_USERS: "7,8" }, ctx);
 assert.match((await res.json()).data.content, /autorização/);
+
+// botão "👀 Vigiar" -> janela com o preço máximo
+const button = { ...cmd, type: 3, data: { custom_id: "v|Madrid|2026-10-23|2026-10-25|17||1|" } };
+res = await worker.fetch(await signed(button), env, ctx);
+const modal = await res.json();
+assert.equal(modal.type, 9);
+assert.equal(modal.data.custom_id, "mv|Madrid|2026-10-23|2026-10-25|17||1|");
+assert.equal(modal.data.components[0].components[0].custom_id, "max");
+
+// janela submetida -> /vigiar com as datas do botão
+calls.length = 0;
+waits.length = 0;
+const submit = { ...cmd, type: 5, data: { custom_id: modal.data.custom_id,
+  components: [{ type: 1, components: [{ type: 4, custom_id: "max", value: "150 €" }] }] } };
+res = await worker.fetch(await signed(submit), env, ctx);
+assert.deepEqual(await res.json(), { type: 5 });
+await Promise.all(waits);
+const vp = JSON.parse(JSON.parse(calls.find((c) => c.url.includes("api.github.com")).init.body).inputs.pedido);
+assert.deepEqual(vp, { acao: "vigiar", destino: "Madrid", ida: "2026-10-23", volta: "2026-10-25",
+  sair_depois: 17, chegar_ate: null, bagagem: "cabine", origem: null, max: 150,
+  user: "42", app_id: "123", token: "tok" });
+
+// preço inválido na janela
+res = await worker.fetch(await signed({ ...submit, data: { ...submit.data,
+  components: [{ type: 1, components: [{ type: 4, custom_id: "max", value: "barato" }] }] } }), env, ctx);
+assert.match((await res.json()).data.content, /só o número/);
 
 console.log("worker: todos os testes passaram");

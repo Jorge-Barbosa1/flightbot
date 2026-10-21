@@ -1,5 +1,5 @@
-// Recebe o comando /flight do Discord e pede ao GitHub Actions para fazer a
-// pesquisa. A resposta com os voos é enviada pelo próprio workflow (follow-up
+// Recebe os comandos do Discord (/flight, /vigiar, /explorar...) e os cliques no
+// botão "👀 Vigiar", e pede ao GitHub Actions para fazer a pesquisa. A resposta com os voos é enviada pelo próprio workflow (follow-up
 // da interação), por isso aqui só se valida, se confirma e se dispara.
 //
 // Variáveis (wrangler.toml / `wrangler secret put`):
@@ -10,7 +10,7 @@
 //   ALLOWED_USERS       (opcional) IDs do Discord autorizados, separados por vírgulas
 
 const WORKFLOW = "check.yml";
-const COMMANDS = ["flight", "vigiar", "vigilancias", "parar"];
+const COMMANDS = ["flight", "vigiar", "vigilancias", "parar", "explorar", "historico"];
 
 // o que aparece logo no Discord enquanto o GitHub trabalha
 function pendingText(p) {
@@ -22,9 +22,34 @@ function pendingText(p) {
       return "📋 A ir buscar a lista de vigilâncias…";
     case "parar":
       return `🛑 A parar a vigilância #${p.id}…`;
+    case "explorar":
+      return `🌍 A ver para onde é mais barato (${when})… são muitos destinos, a resposta chega em 2-4 minutos.`;
+    case "historico":
+      return p.id ? `📉 A desenhar o histórico da vigilância #${p.id}…` : "📉 A desenhar o histórico do Koningsdag…";
     default:
       return `🔎 A procurar voos para **${p.destino}** (${when})… a resposta chega aqui em 1-3 minutos.`;
   }
+}
+
+// botão "👀 Vigiar": custom_id = v|destino|ida|volta|hora_min|chegar_ate|mala|origem
+function parseWatchId(id) {
+  const [, destino, ida, volta, sair, chegar, mala, origem] = id.split("|");
+  return {
+    destino, ida, volta,
+    sair_depois: sair ? Number(sair) : null,
+    chegar_ate: chegar ? Number(chegar) : null,
+    bagagem: mala === "1" ? "cabine" : null,
+    origem: origem || null,
+  };
+}
+
+function findInput(components, id) {
+  for (const c of components || []) {
+    if (c.custom_id === id && "value" in c) return c.value;
+    const inner = findInput(c.components ?? (c.component ? [c.component] : []), id);
+    if (inner !== undefined) return inner;
+  }
+  return undefined;
 }
 
 export default {
@@ -47,27 +72,52 @@ export default {
     if (interaction.type === 1) {
       return json({ type: 1 }); // PING do Discord ao configurar o endpoint
     }
-    const acao = interaction.data?.name;
-    if (interaction.type !== 2 || !COMMANDS.includes(acao)) {
-      return reply("Comando desconhecido.");
-    }
 
     const user = interaction.member?.user ?? interaction.user ?? {};
     const allowed = (env.ALLOWED_USERS || "").split(",").map((s) => s.trim()).filter(Boolean);
     if (allowed.length && !allowed.includes(user.id)) {
       return reply("Não tens autorização para usar este comando.");
     }
+    const base = { user: user.id ?? null, app_id: interaction.application_id, token: interaction.token };
 
+    // clique no botão "👀 Vigiar": pede o preço máximo numa janela
+    if (interaction.type === 3 && interaction.data?.custom_id?.startsWith("v|")) {
+      const w = parseWatchId(interaction.data.custom_id);
+      return json({
+        type: 9,
+        data: {
+          custom_id: `m${interaction.data.custom_id}`,
+          title: `Vigiar ${w.destino}`.slice(0, 45),
+          components: [{
+            type: 1,
+            components: [{
+              type: 4, custom_id: "max", style: 1, label: "Preço máximo por pessoa (€, ida e volta)",
+              placeholder: "ex. 150", min_length: 1, max_length: 5, required: true,
+            }],
+          }],
+        },
+      });
+    }
+
+    // janela submetida: cria a vigilância
+    if (interaction.type === 5 && interaction.data?.custom_id?.startsWith("mv|")) {
+      const max = parseInt(String(findInput(interaction.data.components, "max") ?? "").replace(/\D/g, ""), 10);
+      if (!max) {
+        return reply("Escreve só o número, por exemplo 150.");
+      }
+      const pedido = { acao: "vigiar", ...parseWatchId(interaction.data.custom_id.slice(1)), max, ...base };
+      ctx.waitUntil(dispatch(env, pedido));
+      return json({ type: 5 });
+    }
+
+    const acao = interaction.data?.name;
+    if (interaction.type !== 2 || !COMMANDS.includes(acao)) {
+      return reply("Comando desconhecido.");
+    }
     const options = Object.fromEntries(
       (interaction.data.options || []).map((o) => [o.name, o.value]),
     );
-    const pedido = {
-      acao,
-      ...options,
-      user: user.id ?? null,
-      app_id: interaction.application_id,
-      token: interaction.token,
-    };
+    const pedido = { acao, ...options, ...base };
 
     ctx.waitUntil(dispatch(env, pedido));
     return json({ type: 5 }); // "a pensar..." até a resposta chegar
