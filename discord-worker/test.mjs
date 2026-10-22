@@ -1,6 +1,6 @@
 // Testes do worker sem rede: `node discord-worker/test.mjs`
 import assert from "node:assert/strict";
-import worker from "./src/index.js";
+import worker, { scheduled } from "./src/index.js";
 
 const { publicKey, privateKey } = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
 const pubHex = Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("hex");
@@ -103,5 +103,17 @@ assert.deepEqual(vp, { acao: "vigiar", destino: "Madrid", ida: "2026-10-23", vol
 res = await worker.fetch(await signed({ ...submit, data: { ...submit.data,
   components: [{ type: 1, components: [{ type: 4, custom_id: "max", value: "barato" }] }] } }), env, ctx);
 assert.match((await res.json()).data.content, /só o número/);
+
+// agendamentos: o resumo diário pede summary=true, os outros false
+for (const [cron, summary] of [["30 8 * * *", "true"], ["0 7,13,19 * * *", "false"]]) {
+  calls.length = 0;
+  await worker.scheduled({ cron }, env, { waitUntil: (p) => waits.push(p) });
+  await Promise.all(waits);
+  const body = JSON.parse(calls.find((c) => c.url.includes("api.github.com")).init.body);
+  assert.deepEqual(body, { ref: "master", inputs: { summary } });
+}
+// se o GitHub recusar, o erro aparece nos logs da Cloudflare
+globalThis.fetch = async () => new Response("bad credentials", { status: 401 });
+await assert.rejects(scheduled({ cron: "30 8 * * *" }, env), /HTTP 401/);
 
 console.log("worker: todos os testes passaram");

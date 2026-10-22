@@ -2,6 +2,12 @@ name = "flightwatch-discord"
 main = "src/index.js"
 compatibility_date = "2025-09-01"
 
+# Agendamentos (UTC): alertas 3x por dia e o resumo diário. Disparam o workflow
+# do GitHub, cujo agendador próprio chegava a atrasar horas.
+# Portugal no inverno = UTC; no verão é +1h (08:30 UTC = 09:30 em Lisboa).
+[triggers]
+crons = ["0 7,13,19 * * *", "30 8 * * *"]
+
 [vars]
 GITHUB_REPO = "Jorge-Barbosa1/flightbot"
 GITHUB_REF = "master"

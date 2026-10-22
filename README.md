@@ -9,7 +9,7 @@ opções mais baratas no canal. Ou pedes-lhe para vigiar uma viagem e ele avisa-
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Discord](https://img.shields.io/badge/Discord-slash%20commands-5865F2?logo=discord&logoColor=white)
-![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-cron-2088FF?logo=githubactions&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-runner-2088FF?logo=githubactions&logoColor=white)
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)
 ![Custo](https://img.shields.io/badge/custo-0%20€-2ea44f)
 
@@ -82,7 +82,7 @@ Tudo grátis: sem APIs pagas, sem servidores e sem IA.
 flowchart LR
     U["💬 /flight no Discord"] --> W["☁️ Cloudflare Worker<br/>valida e confirma"]
     W -->|workflow_dispatch| G["⚙️ GitHub Actions<br/>src/flightwatch.py"]
-    C["⏰ cron 3× por dia"] --> G
+    C["⏰ Cloudflare Cron<br/>3× por dia + resumo"] --> W
     G -->|scraping| F["🔎 Google Flights"]
     G -->|resposta / alertas| D["📣 Discord"]
     G -->|commit| R[("🗂️ data/<br/>histórico, vigilâncias")]
@@ -93,9 +93,11 @@ flowchart LR
   passar a página de consentimento da UE e ler também a lista de "melhores voos".
 - **Ida e volta são pesquisadas em separado** (e também como bilhete de ida e volta), e o bot fica
   com a combinação mais barata.
-- **GitHub Actions** corre as pesquisas: 3× por dia para os alertas, às 9h30 para o resumo, e a
+- **GitHub Actions** corre as pesquisas: 3× por dia para os alertas, de manhã para o resumo, e a
   pedido quando usas um comando.
-- **O Cloudflare Worker** é a ponte entre o Discord e o GitHub. Está sempre ligado e é grátis.
+- **O Cloudflare Worker** é a ponte entre o Discord e o GitHub. Está sempre ligado e é grátis, e
+  também faz os agendamentos (Cron Triggers): o agendador do próprio GitHub chegava a atrasar 3 a 6
+  horas ou a saltar execuções.
 - **O estado fica no próprio repositório** (`data/`): sem base de dados.
 
 ## Instalação
@@ -166,7 +168,7 @@ bagagem, preço máximo por pessoa e anti-spam.
 src/flightwatch.py           pesquisa, combinações, alertas, vigilâncias, Discord
 config.yaml                  viagem vigiada e limites
 discord-worker/              Cloudflare Worker + registo dos comandos
-.github/workflows/check.yml  cron e pedidos do Discord
+.github/workflows/check.yml  pesquisas (chamado pelo worker: agendamentos e pedidos do Discord)
 data/                        histórico (legs.csv), estado e vigilâncias (gerados pelo bot)
 tests/                       testes sem rede (pytest)
 docs/CONTEXT.md              notas e decisões do projeto
