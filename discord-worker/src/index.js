@@ -8,6 +8,7 @@
 //   GITHUB_REPO         ex. Jorge-Barbosa1/flightbot
 //   GITHUB_REF          branch, ex. master
 //   ALLOWED_USERS       (opcional) IDs do Discord autorizados, separados por vírgulas
+//   DISCORD_WEBHOOK_URL (opcional) canal para avisar se um agendamento falhar
 
 const WORKFLOW = "check.yml";
 const SUMMARY_CRON = "30 8 * * *"; // tem de ser igual ao de wrangler.toml
@@ -148,9 +149,25 @@ function runWorkflow(env, inputs) {
 // GitHub chegava a atrasar 3-6 horas; este dispara à hora certa.
 export async function scheduled(event, env) {
   const summary = event.cron === SUMMARY_CRON;
-  const res = await runWorkflow(env, { summary: String(summary) });
-  if (!res.ok) {
-    throw new Error(`GitHub recusou o agendamento ${event.cron}: HTTP ${res.status} ${await res.text()}`);
+  let problem;
+  try {
+    const res = await runWorkflow(env, { summary: String(summary) });
+    if (!res.ok) problem = `HTTP ${res.status} ${(await res.text()).slice(0, 200)}`;
+  } catch (e) {
+    problem = String(e);
+  }
+  if (problem) {
+    if (env.DISCORD_WEBHOOK_URL) {
+      await fetch(env.DISCORD_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: `⚠️ **Não consegui arrancar a pesquisa agendada** (${event.cron}): ${problem}\n` +
+            "Se for 401, o token do GitHub no worker expirou ou foi apagado.",
+        }),
+      });
+    }
+    throw new Error(`GitHub recusou o agendamento ${event.cron}: ${problem}`);
   }
 }
 

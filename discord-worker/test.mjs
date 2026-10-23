@@ -113,7 +113,12 @@ for (const [cron, summary] of [["30 8 * * *", "true"], ["0 7,13,19 * * *", "fals
   assert.deepEqual(body, { ref: "master", inputs: { summary } });
 }
 // se o GitHub recusar, o erro aparece nos logs da Cloudflare
-globalThis.fetch = async () => new Response("bad credentials", { status: 401 });
-await assert.rejects(scheduled({ cron: "30 8 * * *" }, env), /HTTP 401/);
+const posts = [];
+globalThis.fetch = async (url, init) => {
+  posts.push({ url, init });
+  return url.includes("api.github.com") ? new Response("bad credentials", { status: 401 }) : new Response(null, { status: 204 });
+};
+await assert.rejects(scheduled({ cron: "30 8 * * *" }, { ...env, DISCORD_WEBHOOK_URL: "https://hook.test/x" }), /HTTP 401/);
+assert.match(JSON.parse(posts.find((c) => c.url === "https://hook.test/x").init.body).content, /Não consegui arrancar/);
 
 console.log("worker: todos os testes passaram");

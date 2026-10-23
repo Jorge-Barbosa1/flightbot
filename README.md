@@ -24,6 +24,8 @@ opções mais baratas no canal. Ou pedes-lhe para vigiar uma viagem e ele avisa-
 | 🔎 **Pesquisa à medida** | `/flight` para qualquer cidade, aeroporto ou **país** inteiro |
 | 🌍 **Para onde é mais barato?** | `/explorar` testa ~25 destinos e devolve o ranking |
 | 📅 **Datas flexíveis** | "fins de semana de novembro", "próximos 4 fins de semana", "tarde 23/10" |
+| 🎉 **Feriados e pontes** | "próximos feriados", "pontes de dezembro": conhece os feriados portugueses (e o São João) e monta os fins de semana prolongados |
+| 👫 **Preço real para 2** | Pesquisa logo para o nº de pessoas: se só houver 1 lugar àquele preço, vê-se |
 | 👀 **Vigilâncias** | `/vigiar` uma viagem com preço máximo, ou um clique no botão **👀** de um resultado. Verifica 3× por dia e avisa-te no canal |
 | 📉 **Histórico** | `/historico` desenha o gráfico da evolução do preço |
 | 📈 **Compra já** | Avisa quando o preço sobe 3 vezes seguidas ou chega ao mínimo de sempre |
@@ -32,6 +34,7 @@ opções mais baratas no canal. Ou pedes-lhe para vigiar uma viagem e ele avisa-
 | 🚆 **Aeroportos vizinhos** | Soma o comboio até ao destino final (ex. voar para Weeze e apanhar o comboio para Amesterdão) |
 | 🚉 **Partir de Lisboa** | Testa também Lisboa (ou Vigo/Santiago), com o comboio desde o Porto e o tempo para lá chegar |
 | 🏨 **Alojamento** | Cada resultado traz links para o Booking e o Airbnb já com a cidade e as datas |
+| ⚠️ **Avisa se avariar** | Se o Google bloquear ou a página mudar, avisa no Discord (e outra vez quando voltar ao normal) |
 | 🇳🇱 **Koningsdag 2027** | A viagem que deu origem a isto, vigiada sozinha 3× por dia com resumo às 9h30 |
 
 Tudo grátis: sem APIs pagas, sem servidores e sem IA.
@@ -43,6 +46,7 @@ Tudo grátis: sem APIs pagas, sem servidores e sem IA.
 /flight   destino:Itália quando:fins de semana de novembro bagagem:com mala de cabine
 /flight   destino:Holanda ida:24/04 volta:01/05 origem:OPO,LIS
 /explorar quando:fins de semana de novembro max:100
+/explorar quando:pontes de dezembro
 /vigiar   destino:Holanda max:140 ida:tarde 23/04 volta:01/05
 /historico
 /vigilancias
@@ -57,6 +61,8 @@ Tudo grátis: sem APIs pagas, sem servidores e sem IA.
 | `destino` | `Madrid`, `Londres`, `Holanda`, `Espanha`, `MAD`, `MAD,BCN` | Cidade, país (todos os aeroportos principais) ou códigos |
 | `ida` / `volta` | `23/10`, `23/10/2026`, `23/10 a 24/10`, `tarde 23/10`, `cedo 25/10` | Sem ano usa a próxima vez que o dia acontece. **tarde** = sair a partir das 17h; **cedo** = chegar ao Porto até às 15h |
 | `quando` | `fins de semana de novembro`, `próximos 4 fins de semana`, `este fim de semana` | Em vez de ida/volta: testa cada fim de semana (sexta 17h → domingo) |
+| `quando` *(feriados)* | `próximos feriados`, `próximos 6 feriados`, `pontes de dezembro` | Fins de semana prolongados: feriado à segunda/sexta, ou com ponte se calhar à terça/quinta |
+| `pessoas` | `2`, `4` | Para quantas pessoas pesquisar (por defeito 2); o preço continua por pessoa |
 | `sair_depois` / `chegar_ate` | `18`, `14` | Horas exatas para a ida e a volta |
 | `bagagem` | `com mala de cabine` | Soma a mala de cabine ao preço |
 | `top` | `5` | Quantas opções mostrar (por defeito 3) |
@@ -161,6 +167,7 @@ bagagem, preço máximo por pessoa e anti-spam.
 | 🔔 Vigilância | Igual, para cada `/vigiar`, com menção a quem a criou |
 | 📈 A subir | 3 subidas seguidas e pelo menos +10 € (ou +5%), uma vez por subida |
 | 📉 Mínimo de sempre | ≥ 5 € abaixo do mínimo visto, depois de pelo menos 6 medições |
+| ⚠️ Avaria | 2 execuções seguidas sem voos, um agendamento que não arrancou, ou um workflow que rebentou |
 
 ## Estrutura
 

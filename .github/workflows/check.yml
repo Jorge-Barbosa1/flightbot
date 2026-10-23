@@ -70,6 +70,14 @@ jobs:
           else
             python src/flightwatch.py
           fi
+      - name: Avisar no Discord se falhar
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          msg="⚠️ **Uma execução do FlightBot rebentou.** Detalhes: <$RUN_URL>"
+          curl -sS -H "Content-Type: application/json" -d "{\"content\": \"$msg\"}" "$DISCORD_WEBHOOK_URL"
       - name: Guardar histórico
         run: |
           git config user.name "flightwatch-bot"

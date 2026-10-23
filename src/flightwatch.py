@@ -73,6 +73,7 @@ class Leg:
     stops: int           # escalas na ida
     currency: str
     ret_day: str | None = None
+    adults: int = 1      # para quantas pessoas foi pesquisado (o preço é por pessoa)
     depart: str = ""     # HH:MM de partida do primeiro voo
     arrive: str = ""     # HH:MM de chegada do último voo (só nos voos só de ida)
 
@@ -90,7 +91,7 @@ class Leg:
         q = create_query(
             flights=flights,
             trip="round-trip" if self.ret_day else "one-way",
-            passengers=Passengers(adults=1),
+            passengers=Passengers(adults=self.adults),
             currency=self.currency,
             language="pt-PT",
         )
@@ -276,6 +277,85 @@ def parse_when(text: str, today: date | None = None) -> list[tuple[str, str]]:
     return pairs[:MAX_WEEKENDS]
 
 
+HOLIDAY_WORDS = {"feriado", "feriados", "ponte", "pontes", "holiday", "holidays"}
+MAX_HOLIDAYS = 8
+
+
+def easter(year: int) -> date:
+    """Domingo de Páscoa (algoritmo anónimo gregoriano)."""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    m = (32 + 2 * e + 2 * i - h - k) % 7
+    n = (a + 11 * h + 22 * m) // 451
+    month, day = divmod(h + m - 7 * n + 114, 31)
+    return date(year, month, day + 1)
+
+
+def pt_holidays(year: int, local: dict | None = None) -> dict[date, str]:
+    """Feriados nacionais (+ Carnaval, que quase todos dão) e os locais do config."""
+    fixed = {(1, 1): "Ano Novo", (4, 25): "25 de Abril", (5, 1): "1.º de Maio", (6, 10): "Dia de Portugal",
+             (8, 15): "Assunção", (10, 5): "5 de Outubro", (11, 1): "Todos os Santos",
+             (12, 1): "1.º de Dezembro", (12, 8): "Imaculada Conceição", (12, 25): "Natal"}
+    days = {date(year, m, d): name for (m, d), name in fixed.items()}
+    e = easter(year)
+    days[e - timedelta(days=47)] = "Carnaval"
+    days[e - timedelta(days=2)] = "Sexta-feira Santa"
+    days[e + timedelta(days=60)] = "Corpo de Deus"
+    for md, name in (local or {}).items():
+        m, d = (int(x) for x in str(md).split("-"))
+        days[date(year, m, d)] = name
+    return days
+
+
+def long_weekends(today: date, local: dict | None = None) -> list[tuple[str, str, str]]:
+    """Fins de semana prolongados nos próximos 12 meses: (ida, volta, nome).
+    Feriado à segunda: sex -> seg; à sexta: qui -> dom; à terça ou quinta fazem
+    ponte (sex -> ter, qua -> dom). À quarta e ao fim de semana não dá jeito."""
+    plans = {
+        0: (-3, 0, ""), 4: (-1, 2, ""),
+        1: (-4, 0, " (ponte na segunda)"), 3: (-1, 3, " (ponte na sexta)"),
+    }
+    out = []
+    for year in (today.year, today.year + 1):
+        for day, name in sorted(pt_holidays(year, local).items()):
+            if day.weekday() not in plans or day > today + timedelta(days=366):
+                continue
+            a, b, extra = plans[day.weekday()]
+            if day + timedelta(days=a) < today:
+                continue
+            out.append(((day + timedelta(days=a)).isoformat(), (day + timedelta(days=b)).isoformat(), name + extra))
+    seen, unique = set(), []
+    for o, r, name in out:
+        if (o, r) not in seen:
+            seen.add((o, r))
+            unique.append((o, r, name))
+    return unique
+
+
+def parse_holidays(text: str, today: date | None = None,
+                   local: dict | None = None) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """'feriados', 'próximos 3 feriados', 'pontes de dezembro' -> pares e nomes."""
+    today = today or date.today()
+    words = re.findall(r"[a-zà-ú]+|\d+", text.lower())
+    nums = [int(w) for w in words if w.isdigit()]
+    month = next((MONTH_WORDS[w] for w in words if w in MONTH_WORDS), None)
+    found = long_weekends(today, local)
+    if month:
+        found = [x for x in found if int(x[0][5:7]) == month or int(x[1][5:7]) == month]
+    found = found[: min(nums[0], MAX_HOLIDAYS) if nums else 4]
+    if not found:
+        raise ValueError("Não encontrei fins de semana prolongados" + (" nesse mês." if month else "."))
+    return [(o, r) for o, r, _ in found], {f"{o}>{r}": name for o, r, name in found}
+
+
+def is_holiday_text(text: str | None) -> bool:
+    return bool(text) and bool(HOLIDAY_WORDS & set(re.findall(r"[a-zà-ú]+", text.lower())))
+
+
 def parse_bags(bagagem: str | None) -> int:
     """Malas de cabine a incluir no preço (o Google só sabe somar a de cabine)."""
     if not bagagem or str(bagagem).lower() in ("nenhuma", "não", "nao", "no", "false", "0"):
@@ -372,7 +452,8 @@ def is_country(destino: str | None) -> bool:
 def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None, hora: int | None,
                   destino: str | None = None, chegar_ate: int | None = None,
                   origem: str | None = None, today: date | None = None,
-                  quando: str | None = None, bagagem: str | None = None) -> dict:
+                  quando: str | None = None, bagagem: str | None = None,
+                  pessoas: int | None = None) -> dict:
     """Config para um pedido à medida: só essas datas, top N, e opcionalmente
     outro destino/origem, hora mínima de partida na ida e hora máxima de
     chegada a casa na volta. 'tarde' na ida e 'cedo' na volta também valem.
@@ -382,11 +463,16 @@ def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None
     if quando:
         if ida or volta:
             raise ValueError("Usa 'quando' ou 'ida'/'volta', não os dois.")
-        pairs = parse_when(quando, today)
-        hora = LATE_HOUR if hora is None else hora
+        labels = {}
+        if is_holiday_text(quando):
+            pairs, labels = parse_holidays(quando, today, cfg.get("local_holidays"))
+        else:
+            pairs = parse_when(quando, today)
+        hora = LATE_HOUR if hora is None else hora     # a ida é sempre num dia de trabalho
         out_days, ret_days = [o for o, _ in pairs], [r for _, r in pairs]
         dates = {"pairs": [list(x) for x in pairs], "outbound": [out_days[0], out_days[-1]],
-                 "return": [ret_days[0], ret_days[-1]], "min_nights": 0, "max_nights": 60}
+                 "return": [ret_days[0], ret_days[-1]], "min_nights": 0, "max_nights": 60,
+                 "labels": labels}
         top = top or len(pairs)
         per_pair = 1
     else:
@@ -430,6 +516,10 @@ def apply_request(cfg: dict, ida: str | None, volta: str | None, top: int | None
     new["dates"] = dates
     new["alerts"] = {**cfg["alerts"], "summary_top_n": top}
     new["search"] = {**cfg["search"], "options_per_search": per_pair, "carry_on_bags": parse_bags(bagagem)}
+    if pessoas:
+        if not 1 <= pessoas <= 9:
+            raise ValueError("pessoas: entre 1 e 9.")
+        new["search"]["passengers"] = pessoas
     new["max_queries_per_run"] = None
     new["request"] = {"per_pair": per_pair, "destino": destino, "origem": origem}
     return new
@@ -552,6 +642,7 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
     from fast_flights import FlightQuery, FlightsNotFound, Passengers, create_query
 
     s = cfg["search"]
+    adults = max(1, int(s.get("passengers", 1)))
     flights = [FlightQuery(date=day, from_airport=frm, to_airport=to, max_stops=s.get("max_stops"))]
     if ret:
         flights.append(FlightQuery(date=ret, from_airport=to, to_airport=frm, max_stops=s.get("max_stops")))
@@ -559,7 +650,8 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
         flights=flights,
         trip="round-trip" if ret else "one-way",
         seat="economy",
-        passengers=Passengers(adults=1),  # preço por pessoa; multiplicamos depois
+        # pesquisa para todos: se só houver 1 lugar àquele preço, o total sobe e vê-se
+        passengers=Passengers(adults=adults),
         currency=s["currency"],
         language="pt-PT",
         carry_on_bags=s.get("carry_on_bags", 0),
@@ -594,11 +686,12 @@ def fetch_cheapest(frm: str, to: str, day: str, ret: str | None, cfg: dict) -> l
     for f in sorted(priced, key=lambda f: f.price):
         leg = Leg(
             frm=frm, to=to, day=day,
-            price=float(f.price),
+            price=round(float(f.price) / adults, 2),   # o Google dá o total para todos
             airlines=", ".join(f.airlines),
             stops=max(len(f.flights) - 1, 0),
             currency=s["currency"],
             ret_day=ret,
+            adults=adults,
             depart="%02d:%02d" % tuple(f.flights[0].departure.time) if f.flights else "",
             arrive="" if ret or not f.flights else format_arrival(f.flights[-1].arrival, day),
         )
@@ -746,9 +839,11 @@ def stay_links(trip: Trip, cfg: dict) -> str:
 def format_alert(trip: Trip, cfg: dict) -> str:
     n = cfg["search"]["passengers"]
     cur = trip.out.currency
+    label = (cfg["dates"].get("labels") or {}).get(trip.key)
+    holiday = f" · 🎉 {label}" if label else ""
     text = (
         f"✈️ **{fmt_day(trip.out.day)} → {fmt_day(trip.ret_day)}** · {trip.nights} noites · "
-        f"**{trip.total:.0f} {cur}/pessoa** (≈ {trip.total * n:.0f} {cur} para {n})\n"
+        f"**{trip.total:.0f} {cur}/pessoa** (≈ {trip.total * n:.0f} {cur} para {n}){holiday}\n"
         + (format_leg("Ida e volta", trip.out, trip.ground_out, cfg) if trip.ret is None else
            f"{format_leg('Ida', trip.out, trip.ground_out, cfg, trip.home_out)}\n"
            f"{format_leg('Volta', trip.ret, trip.ground_ret, cfg, trip.home_ret)}")
@@ -849,10 +944,20 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
     (mesmo que não haja nada) e não mexe no estado dos alertas."""
     state = load_state(state_path)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    legs, all_failed = search_all(cfg, fetch, sleep)
+    errors: list[str] = []
+    legs, all_failed = search_all(cfg, fetch, sleep, errors)
     if all_failed:
         print("Todas as pesquisas falharam (o Google pode estar a bloquear este IP).")
-        return 1
+    if request and not legs and all_failed:
+        send_discord("❌ Não consegui pesquisar agora (o Google pode estar a bloquear). "
+                     "Tenta outra vez daqui a bocado.", dry_run)
+        return 0
+    if not request:
+        health_check(state, bool(legs), errors, dry_run)
+        if all_failed:
+            if not dry_run:
+                save_state(state, state_path)
+            return 0          # o aviso já foi tratado; não vale a pena falhar o workflow
 
     if not dry_run and not request:  # o histórico é só da vigilância do Koningsdag
         append_history(legs, now, history_path)
@@ -908,7 +1013,32 @@ def run(cfg: dict, dry_run: bool = False, summary: bool = False,
     return 0
 
 
-def search_all(cfg: dict, fetch=fetch_cheapest, sleep=time.sleep) -> tuple[list[Leg], bool]:
+HEALTH_BAD_RUNS = 2   # execuções seguidas sem voos até avisar
+
+
+def health_check(state: dict, ok: bool, errors: list[str], dry_run: bool = False) -> None:
+    """Avisa no Discord quando o Koningsdag deixa de devolver voos (o Google a
+    bloquear ou a página a mudar) e quando volta a funcionar. Uma vez de cada."""
+    h = state.setdefault("_health", {"bad_runs": 0, "alerted": False})
+    if ok:
+        if h.get("alerted"):
+            send_discord("✅ **O FlightBot voltou a conseguir pesquisar voos.** Está tudo normal outra vez.",
+                         dry_run)
+        h.update(bad_runs=0, alerted=False)
+        return
+    h["bad_runs"] = h.get("bad_runs", 0) + 1
+    if h["bad_runs"] >= HEALTH_BAD_RUNS and not h.get("alerted"):
+        why = f"Último erro: `{errors[-1]}`" if errors else "As pesquisas vieram sem nenhum voo."
+        send_discord(
+            f"⚠️ **O FlightBot não está a conseguir pesquisar voos** ({h['bad_runs']} execuções seguidas).\n"
+            f"{why}\nPode ser o Google a bloquear os pedidos ou a página ter mudado. Enquanto isto durar "
+            "não chegam alertas. Vê os detalhes em GitHub → Actions. Aviso outra vez quando voltar ao normal.",
+            dry_run)
+        h["alerted"] = True
+
+
+def search_all(cfg: dict, fetch=fetch_cheapest, sleep=time.sleep,
+               errors: list | None = None) -> tuple[list[Leg], bool]:
     """Corre todas as pesquisas do cfg. Devolve (voos, todas_falharam).
     Com `search.workers` > 1 faz várias ao mesmo tempo (o /explorar usa isto)."""
     searches = build_searches(cfg)
@@ -923,6 +1053,8 @@ def search_all(cfg: dict, fetch=fetch_cheapest, sleep=time.sleep) -> tuple[list[
             found = found if isinstance(found, list) else [found] if found else []
         except Exception as e:  # noqa: BLE001 - não queremos parar tudo por uma pesquisa
             print(f"  ! {frm}-{to} {day}{'->' + ret if ret else ''}: {type(e).__name__}: {str(e)[:120]}")
+            if errors is not None:
+                errors.append(f"{type(e).__name__}: {str(e)[:150]}")
             found = None
         sleep(cfg["search"]["delay_seconds"])
         return found
@@ -1082,7 +1214,8 @@ def watch_cfg(cfg: dict, w: dict) -> dict:
         "search_origins": w.get("search_origins", {}),
         "stay_city": None,
         "dates": w["dates"],
-        "search": {**cfg["search"], "carry_on_bags": w.get("carry_on_bags", 0), "options_per_search": 1},
+        "search": {**cfg["search"], "carry_on_bags": w.get("carry_on_bags", 0), "options_per_search": 1,
+                   "passengers": w.get("passengers", cfg["search"]["passengers"])},
         "alerts": {**cfg["alerts"], "max_price_per_person": w["max"]},
         "max_queries_per_run": None,
     }
@@ -1213,7 +1346,7 @@ def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheap
         rc = apply_request(cfg, req.get("ida"), req.get("volta"), num("top"), num("sair_depois"),
                            destino=req.get("destino"), chegar_ate=num("chegar_ate"),
                            origem=req.get("origem"), today=today, quando=req.get("quando"),
-                           bagagem=req.get("bagagem"))
+                           bagagem=req.get("bagagem"), pessoas=num("pessoas"))
 
         if acao == "flight":
             return run(rc, dry_run=dry_run, fetch=fetch, sleep=sleep, state_path=state_path,
@@ -1237,6 +1370,7 @@ def handle_pedido(cfg: dict, req: dict, dry_run: bool = False, fetch=fetch_cheap
                 "search_origins": rc["search_origins"],
                 "dates": rc["dates"],
                 "carry_on_bags": rc["search"]["carry_on_bags"],
+                "passengers": rc["search"]["passengers"],
                 "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             legs, _ = search_all(watch_cfg(cfg, w), fetch, sleep)
@@ -1273,7 +1407,8 @@ def explore(cfg: dict, req: dict, num, dry_run: bool, fetch=fetch_cheapest,
     codes = list(dict.fromkeys(c for cs in cities.values() for c in cs))
     rc = apply_request(cfg, req.get("ida"), req.get("volta"), 1, num("sair_depois"),
                        destino=",".join(codes), chegar_ate=num("chegar_ate"), origem=req.get("origem"),
-                       today=today, quando=req.get("quando"), bagagem=req.get("bagagem"))
+                       today=today, quando=req.get("quando"), bagagem=req.get("bagagem"),
+                       pessoas=num("pessoas"))
     rc["roundtrip_airports"] = []           # poupa pesquisas: só idas soltas
     rc["search"] = {**rc["search"], "options_per_search": 1,
                     "workers": cfg["search"].get("explore_workers", 6)}
@@ -1299,7 +1434,8 @@ def explore(cfg: dict, req: dict, num, dry_run: bool, fetch=fetch_cheapest,
     for i, (city, _, trip, sub) in enumerate(top, 1):
         out, ret = trip.out, trip.ret
         lines.append(
-            f"**{i}. {city}** · **{trip.total:.0f} €** · {fmt_day(out.day)} → {fmt_day(trip.ret_day)}\n"
+            f"**{i}. {city}** · **{trip.total:.0f} €** · {fmt_day(out.day)} → {fmt_day(trip.ret_day)}"
+            + (f" · 🎉 {rc['dates']['labels'][trip.key]}" if rc["dates"].get("labels") else "") + "\n"
             f"   ida {out.to} {out.airlines} ({'direto' if out.stops == 0 else f'{out.stops} escala(s)'}, "
             f"sai {out.depart}) · volta {ret.frm} {ret.airlines} · "
             f"[ida](<{out.google_flights_url()}>) · [volta](<{ret.google_flights_url()}>)")
@@ -1379,7 +1515,10 @@ def request_title(cfg: dict, destino: str | None, with_top: bool = True) -> str:
         where = f"{cfg['origin']} ⇄ {destino.strip().title()} ({codes})"
     else:
         where = f"{cfg['origin']} ⇄ {codes}"
-    if d.get("pairs"):
+    if d.get("labels"):
+        when = "pontes e feriados: " + ", ".join(
+            f"{d['labels'][f'{o}>{r}']} ({fmt_day(o)} → {fmt_day(r)})" for o, r in d["pairs"])
+    elif d.get("pairs"):
         when = "fins de semana " + ", ".join(fmt_day(o, weekday=False) for o, _ in d["pairs"]) + " (sex → dom)"
     else:
         when = f"{span(*d['outbound'])} → {span(*d['return'])}"

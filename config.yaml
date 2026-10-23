@@ -19,6 +19,10 @@ origins:
 extra_origins:
   LIS: [AMS, BRU, CRL]
 
+# Feriados municipais (MM-DD) que contam para os "feriados"/"pontes" do /explorar e /flight.
+local_holidays:
+  "06-24": São João
+
 # Cidade para os links de alojamento (Booking/Airbnb) nas mensagens do Koningsdag.
 stay_city: Amsterdam
 

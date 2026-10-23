@@ -141,13 +141,32 @@ def test_run_alerts_once_and_state(cfg, tmp_path, monkeypatch):
     assert len(sent) == 1
 
 
-def test_run_all_failures_returns_1(cfg, tmp_path):
+def test_health_alert_after_two_bad_runs_and_recovery(cfg, tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(fw, "send_discord", lambda text, dry=False, *a: sent.append(text))
+
     def boom(*a, **k):
         raise RuntimeError("bloqueado")
 
-    rc = fw.run(cfg, fetch=boom, state_path=tmp_path / "s.json",
-                history_path=tmp_path / "h.csv", sleep=lambda s: None)
-    assert rc == 1
+    paths = {"state_path": tmp_path / "s.json", "history_path": tmp_path / "h.csv"}
+    assert fw.run(cfg, fetch=boom, sleep=lambda s: None, **paths) == 0   # não falha o workflow
+    assert sent == []                                                    # 1 falha: ainda não avisa
+    fw.run(cfg, fetch=boom, sleep=lambda s: None, **paths)
+    assert len(sent) == 1 and "não está a conseguir pesquisar" in sent[0] and "bloqueado" in sent[0]
+    fw.run(cfg, fetch=boom, sleep=lambda s: None, **paths)
+    assert len(sent) == 1                                                # não repete
+    ok = fake_fetch({("OPO", "AMS"): 300, ("AMS", "OPO"): 300})
+    fw.run(cfg, fetch=ok, sleep=lambda s: None, **paths)
+    assert "voltou a conseguir" in sent[-1]
+
+
+def test_request_when_google_blocks(cfg, tmp_path, discord):
+    def boom(*a, **k):
+        raise RuntimeError("bloqueado")
+
+    fw.handle_pedido(cfg, {"acao": "flight", "destino": "MAD", "ida": "20/11", "volta": "22/11"},
+                     fetch=boom, sleep=lambda s: None, today=TODAY, **watch_paths(tmp_path))
+    assert "Não consegui pesquisar" in discord[-1]
 
 
 def test_summary_sends_top_n(cfg, tmp_path, monkeypatch):
@@ -571,3 +590,50 @@ def test_other_origin_needs_time_to_get_there(cfg, monkeypatch):
     monkeypatch.setattr(fw, "parse_flights", lambda html: [F(54, 15, 21), F(80, 12, 19)])
     back = fw.fetch_cheapest("AMS", "LIS", "2027-04-24", None, cfg)
     assert [leg.arrive for leg in back] == ["19:00"]            # chegar a Lisboa às 21h já não dá
+
+
+# ---------------------------------------------------------------- feriados e pontes
+def test_easter_and_holidays():
+    assert fw.easter(2026) == __import__("datetime").date(2026, 4, 5)
+    assert fw.easter(2027) == __import__("datetime").date(2027, 3, 28)
+    h = fw.pt_holidays(2027, {"06-24": "São João"})
+    names = set(h.values())
+    assert {"Carnaval", "Sexta-feira Santa", "Corpo de Deus", "São João", "Natal"} <= names
+
+
+def test_long_weekends():
+    lw = fw.long_weekends(TODAY, {"06-24": "São João"})
+    by_name = {n: (o, r) for o, r, n in lw}
+    assert by_name["Imaculada Conceição (ponte na segunda)"] == ("2026-12-04", "2026-12-08")   # ter
+    assert by_name["Natal"] == ("2026-12-24", "2026-12-27")                                   # sex
+    assert by_name["São João (ponte na sexta)"] == ("2027-06-23", "2027-06-27")               # qui
+    assert not any("25 de Abril" in n for _, _, n in lw)                                      # domingo
+
+
+def test_request_with_holidays(cfg):
+    r = fw.apply_request(cfg, None, None, None, None, destino="MAD", quando="pontes de dezembro", today=TODAY)
+    assert fw.date_pairs(r) == [("2026-11-27", "2026-12-01"), ("2026-12-04", "2026-12-08"),
+                                ("2026-12-24", "2026-12-27"), ("2026-12-31", "2027-01-03")]
+    assert fw.earliest_hour(r, "2026-12-24") == fw.LATE_HOUR
+    title = fw.request_title(r, "MAD")
+    assert "Imaculada Conceição (ponte na segunda) (sex 4 dez → ter 8 dez)" in title
+    t = fw.Trip(leg("OPO", "MAD", "2026-12-24", 60), leg("MAD", "OPO", "2026-12-27", 50), 0, 0)
+    assert "🎉 Natal" in fw.format_alert(t, r)
+    assert len(fw.parse_holidays("próximos 2 feriados", TODAY)[0]) == 2
+
+
+# ---------------------------------------------------------------- 2 pessoas
+def test_price_is_per_person_when_searching_for_two(cfg, monkeypatch):
+    class F:
+        price, airlines = 176, ["Transavia"]
+        seg = type("S", (), {})()
+        seg.departure = type("D", (), {"time": (21, 20), "date": (2027, 4, 24)})()
+        seg.arrival = type("A", (), {"time": (23, 0), "date": (2027, 4, 24)})()
+        flights = [seg]
+
+    monkeypatch.setattr(fw, "_consent_fetcher", lambda: type("X", (), {"fetch_html": lambda s, q: ""})())
+    monkeypatch.setattr(fw, "parse_flights", lambda html: [F()])
+    (found,) = fw.fetch_cheapest("OPO", "AMS", "2027-04-24", None, cfg)
+    assert found.price == 88 and found.adults == 2
+    r = fw.apply_request(cfg, "20/11", "22/11", None, None, destino="MAD", pessoas=4, today=TODAY)
+    assert r["search"]["passengers"] == 4
