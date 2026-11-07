@@ -26,7 +26,7 @@ opções mais baratas no canal. Ou pedes-lhe para vigiar uma viagem e ele avisa-
 | 📅 **Datas flexíveis** | "fins de semana de novembro", "próximos 4 fins de semana", "tarde 23/10" |
 | 🎉 **Feriados e pontes** | "próximos feriados", "pontes de dezembro": conhece os feriados portugueses (e o São João) e monta os fins de semana prolongados |
 | 👫 **Preço real para 2** | Pesquisa logo para o nº de pessoas: se só houver 1 lugar àquele preço, vê-se |
-| 👀 **Vigilâncias** | `/vigiar` uma viagem com preço máximo, ou um clique no botão **👀** de um resultado. Verifica 3× por dia e avisa-te no canal |
+| 👀 **Vigilâncias** | `/vigiar` uma viagem com preço máximo, ou um clique no botão **👀** de um resultado. Verifica 1× por dia e avisa-te no canal |
 | 📉 **Histórico** | `/historico` desenha o gráfico da evolução do preço |
 | 📈 **Compra já** | Avisa quando o preço sobe 3 vezes seguidas ou chega ao mínimo de sempre |
 | 🧳 **Bagagem real** | Opção para somar a mala de cabine (nas low-cost muda tudo) |
@@ -35,7 +35,7 @@ opções mais baratas no canal. Ou pedes-lhe para vigiar uma viagem e ele avisa-
 | 🚉 **Partir de Lisboa** | Testa também Lisboa (ou Vigo/Santiago), com o comboio desde o Porto e o tempo para lá chegar |
 | 🏨 **Alojamento** | Cada resultado traz links para o Booking e o Airbnb já com a cidade e as datas |
 | ⚠️ **Avisa se avariar** | Se o Google bloquear ou a página mudar, avisa no Discord (e outra vez quando voltar ao normal) |
-| 🇳🇱 **Koningsdag 2027** | A viagem que deu origem a isto, vigiada sozinha 3× por dia com resumo às 9h30 |
+| 🇳🇱 **Koningsdag 2027** | A viagem que deu origem a isto, vigiada sozinha, com resumo às 9h30 |
 
 Tudo grátis: sem APIs pagas, sem servidores e sem IA.
 
@@ -88,7 +88,7 @@ Tudo grátis: sem APIs pagas, sem servidores e sem IA.
 flowchart LR
     U["💬 /flight no Discord"] --> W["☁️ Cloudflare Worker<br/>valida e confirma"]
     W -->|workflow_dispatch| G["⚙️ GitHub Actions<br/>src/flightwatch.py"]
-    C["⏰ Cloudflare Cron<br/>3× por dia + resumo"] --> W
+    C["⏰ Cloudflare Cron<br/>1× por dia"] --> W
     G -->|scraping| F["🔎 Google Flights"]
     G -->|resposta / alertas| D["📣 Discord"]
     G -->|commit| R[("🗂️ data/<br/>histórico, vigilâncias")]
@@ -99,7 +99,7 @@ flowchart LR
   passar a página de consentimento da UE e ler também a lista de "melhores voos".
 - **Ida e volta são pesquisadas em separado** (e também como bilhete de ida e volta), e o bot fica
   com a combinação mais barata.
-- **GitHub Actions** corre as pesquisas: 3× por dia para os alertas, de manhã para o resumo, e a
+- **GitHub Actions** corre as pesquisas: 1× por dia (de manhã, com o resumo), e a
   pedido quando usas um comando.
 - **O Cloudflare Worker** é a ponte entre o Discord e o GitHub. Está sempre ligado e é grátis, e
   também faz os agendamentos (Cron Triggers): o agendador do próprio GitHub chegava a atrasar 3 a 6
